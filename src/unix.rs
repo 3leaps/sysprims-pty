@@ -1,6 +1,9 @@
 //! Working with pseudo-terminals
 
-use crate::{Child, CommandBuilder, MasterPty, PtyPair, PtySize, PtySystem, SlavePty};
+use crate::{
+    Child, CommandBuilder, ContainedPtyChild, ContainedPtyGuard, MasterPty, PtyPair, PtySize,
+    PtySystem, SlavePty,
+};
 use anyhow::{bail, Error};
 use filedescriptor::FileDescriptor;
 use libc::{self, winsize};
@@ -296,6 +299,108 @@ impl PtyFd {
 
         Ok(child)
     }
+
+    fn spawn_contained_command(
+        &self,
+        builder: CommandBuilder,
+    ) -> anyhow::Result<ContainedPtyGuard> {
+        let configured_umask = builder.umask;
+        let mut cmd = builder.as_command()?;
+        let controlling_tty = builder.get_controlling_tty();
+        let (hook, pending_receipt) = sysprims_session::prepare_session_acquisition()?;
+
+        unsafe {
+            cmd.stdin(self.as_stdio()?)
+                .stdout(self.as_stdio()?)
+                .stderr(self.as_stdio()?)
+                .pre_exec(move || {
+                    // Match the legacy PTY spawn's signal reset without
+                    // allocating or consulting lock-backed state.
+                    for signo in &[
+                        libc::SIGCHLD,
+                        libc::SIGHUP,
+                        libc::SIGINT,
+                        libc::SIGQUIT,
+                        libc::SIGTERM,
+                        libc::SIGALRM,
+                    ] {
+                        libc::signal(*signo, libc::SIG_DFL);
+                    }
+
+                    let empty_set: libc::sigset_t = std::mem::zeroed();
+                    libc::sigprocmask(libc::SIG_SETMASK, &empty_set, std::ptr::null_mut());
+
+                    // This hook replaces the legacy setsid() slot. It is the
+                    // only session or process-group acquirer for this spawn.
+                    hook.acquire()?;
+
+                    #[allow(clippy::cast_lossless)]
+                    if controlling_tty && libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+
+                    // The PTY and sysprims companion descriptors are prepared
+                    // with CLOEXEC. Avoid portable-pty's allocation-backed
+                    // /dev/fd traversal in this post-fork path.
+                    if let Some(mask) = configured_umask {
+                        libc::umask(mask);
+                    }
+
+                    Ok(())
+                });
+        }
+
+        let mut child = cmd.spawn()?;
+        child.stdin.take();
+        child.stdout.take();
+        child.stderr.take();
+
+        let child = ContainedPtyChild::new(child);
+        let receipt = match pending_receipt.into_receipt(child.child.id()) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                cleanup_failed_spawn_child(child);
+                return Err(error.into());
+            }
+        };
+
+        // SAFETY: `receipt` was sealed by this exact spawn's one-shot hook,
+        // and `child` is its exclusive, unreaped std::process::Child owner.
+        match unsafe { sysprims_timeout::contain_acquired_session(child, receipt) } {
+            Ok(guard) => Ok(guard),
+            Err(adoption) => {
+                cleanup_failed_spawn_child(adoption.child);
+                Err(adoption.error.into())
+            }
+        }
+    }
+}
+
+fn cleanup_failed_spawn_child(mut child: ContainedPtyChild) {
+    match child.child.try_wait() {
+        Ok(Some(_)) => return,
+        Ok(None) => {
+            // Keep the exact handle even if the direct kill races with exit;
+            // a bounded reap attempt still follows.
+            let _ = child.child.kill();
+        }
+        Err(_) => {
+            // Ownership could not be confirmed through the exact child
+            // handle. Never reconstruct signal authority from a raw PID.
+            return;
+        }
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match child.child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Ok(None) | Err(_) => return,
+        }
+    }
 }
 
 /// Represents the master end of a pty.
@@ -337,6 +442,10 @@ impl SlavePty for UnixSlavePty {
         builder: CommandBuilder,
     ) -> Result<Box<dyn Child + Send + Sync>, Error> {
         Ok(Box::new(self.fd.spawn_command(builder)?))
+    }
+
+    fn spawn_contained_command(&self, builder: CommandBuilder) -> Result<ContainedPtyGuard, Error> {
+        self.fd.spawn_contained_command(builder)
     }
 }
 

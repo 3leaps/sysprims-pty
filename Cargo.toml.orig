@@ -19,6 +19,7 @@ shell-words = "1.1"
 serde_derive = {version="1.0", optional=true}
 serde = {version="1.0", optional=true}
 serial2 = "0.2"
+sysprims-timeout = { git = "https://github.com/3leaps/sysprims", rev = "0192fe424925f60536c5bdb93839eeb64175c857" }
 
 [features]
 default = []
@@ -37,6 +38,9 @@ winapi = { version = "0.3", features = [
     "synchapi",
 ]}
 winreg = "0.10"
+
+[target."cfg(unix)".dependencies]
+sysprims-session = { git = "https://github.com/3leaps/sysprims", rev = "0192fe424925f60536c5bdb93839eeb64175c857" }
 
 [dev-dependencies]
 smol = "2.0"

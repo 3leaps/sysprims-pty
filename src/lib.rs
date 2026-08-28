@@ -39,13 +39,30 @@
 //!
 use anyhow::Error;
 use downcast_rs::{impl_downcast, Downcast};
-#[cfg(unix)]
-use libc;
 #[cfg(feature = "serde_support")]
 use serde_derive::*;
 use std::io::Result as IoResult;
 #[cfg(windows)]
 use std::os::windows::prelude::{AsRawHandle, RawHandle};
+
+/// A PTY child whose exclusive reap ownership can be transferred to sysprims.
+///
+/// Callers receive this type only after a containment guard has finalized.
+/// While containment is active, the guard keeps the child handle private.
+#[derive(Debug)]
+pub struct ContainedPtyChild {
+    pub(crate) child: std::process::Child,
+}
+
+impl ContainedPtyChild {
+    #[cfg(unix)]
+    pub(crate) fn new(child: std::process::Child) -> Self {
+        Self { child }
+    }
+}
+
+/// An owned, spawn-time-acquired PTY containment capability.
+pub type ContainedPtyGuard = sysprims_timeout::ContainmentGuard<ContainedPtyChild>;
 
 pub mod cmdbuilder;
 pub use cmdbuilder::CommandBuilder;
@@ -163,6 +180,17 @@ impl_downcast!(ChildKiller);
 pub trait SlavePty {
     /// Spawns the command specified by the provided CommandBuilder
     fn spawn_command(&self, cmd: CommandBuilder) -> Result<Box<dyn Child + Send + Sync>, Error>;
+
+    /// Spawns a command with a sealed same-spawn sysprims containment guard.
+    ///
+    /// Native Unix PTYs provide guaranteed spawn-time acquisition. Other PTY
+    /// implementations reject this operation before spawning a process.
+    fn spawn_contained_command(&self, cmd: CommandBuilder) -> Result<ContainedPtyGuard, Error> {
+        let _ = cmd;
+        Err(anyhow::anyhow!(
+            "spawn-time PTY containment is unavailable for this PTY implementation"
+        ))
+    }
 }
 
 /// Represents the exit status of a child process.
@@ -270,10 +298,7 @@ impl_downcast!(PtySystem);
 
 impl Child for std::process::Child {
     fn try_wait(&mut self) -> IoResult<Option<ExitStatus>> {
-        std::process::Child::try_wait(self).map(|s| match s {
-            Some(s) => Some(s.into()),
-            None => None,
-        })
+        std::process::Child::try_wait(self).map(|status| status.map(Into::into))
     }
 
     fn wait(&mut self) -> IoResult<ExitStatus> {
@@ -287,6 +312,44 @@ impl Child for std::process::Child {
     #[cfg(windows)]
     fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
         Some(std::os::windows::io::AsRawHandle::as_raw_handle(self))
+    }
+}
+
+impl Child for ContainedPtyChild {
+    fn try_wait(&mut self) -> IoResult<Option<ExitStatus>> {
+        std::process::Child::try_wait(&mut self.child).map(|status| status.map(Into::into))
+    }
+
+    fn wait(&mut self) -> IoResult<ExitStatus> {
+        std::process::Child::wait(&mut self.child).map(Into::into)
+    }
+
+    fn process_id(&self) -> Option<u32> {
+        Some(self.child.id())
+    }
+
+    #[cfg(windows)]
+    fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+        Some(std::os::windows::io::AsRawHandle::as_raw_handle(
+            &self.child,
+        ))
+    }
+}
+
+impl sysprims_timeout::ContainmentChild for ContainedPtyChild {
+    fn process_id(&self) -> Option<u32> {
+        Some(self.child.id())
+    }
+
+    fn try_wait(&mut self) -> IoResult<bool> {
+        std::process::Child::try_wait(&mut self.child).map(|status| status.is_some())
+    }
+
+    #[cfg(windows)]
+    fn raw_process_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+        Some(std::os::windows::io::AsRawHandle::as_raw_handle(
+            &self.child,
+        ))
     }
 }
 
@@ -394,6 +457,16 @@ impl ChildKiller for std::process::Child {
         Box::new(ProcessSignaller {
             pid: self.process_id(),
         })
+    }
+}
+
+impl ChildKiller for ContainedPtyChild {
+    fn kill(&mut self) -> IoResult<()> {
+        ChildKiller::kill(&mut self.child)
+    }
+
+    fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+        ChildKiller::clone_killer(&self.child)
     }
 }
 
