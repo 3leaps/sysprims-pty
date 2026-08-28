@@ -518,7 +518,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "portable-pty"
+name = "sysprims-pty"
 version = "0.9.0"
 dependencies = [
  "anyhow",

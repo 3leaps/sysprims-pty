@@ -11,7 +11,7 @@
 
 [package]
 edition = "2018"
-name = "portable-pty"
+name = "sysprims-pty"
 version = "0.9.0"
 authors = ["Wez Furlong"]
 build = false
@@ -20,11 +20,11 @@ autobins = false
 autoexamples = false
 autotests = true
 autobenches = false
-description = "Cross platform pty interface"
-documentation = "https://docs.rs/portable-pty"
+description = "Cross-platform PTY interface with sysprims containment"
+documentation = "https://docs.rs/sysprims-pty"
 readme = false
 license = "MIT"
-repository = "https://github.com/wezterm/wezterm"
+repository = "https://github.com/3leaps/sysprims-pty"
 resolver = "2"
 
 [lib]

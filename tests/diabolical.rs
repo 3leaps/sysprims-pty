@@ -7,7 +7,7 @@ use sysprims_timeout::{ContainmentCompletionEvidence, TerminateTreeConfig, TreeK
 
 fn require_disposable_container() {
     assert_eq!(
-        std::env::var("PORTABLE_PTY_DISPOSABLE").as_deref(),
+        std::env::var("SYSPRIMS_PTY_DISPOSABLE").as_deref(),
         Ok("1"),
         "diabolical tests require the disposable runner"
     );

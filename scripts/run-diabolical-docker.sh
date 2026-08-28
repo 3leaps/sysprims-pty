@@ -14,7 +14,7 @@ test "$(git -C "$sysprims_root" rev-parse HEAD)" = \
 test -z "$(git -C "$sysprims_root" status --short)"
 
 docker run --rm \
-    --env PORTABLE_PTY_DISPOSABLE=1 \
+    --env SYSPRIMS_PTY_DISPOSABLE=1 \
     --volume "$companion_root:/work/companion:ro" \
     --volume "$sysprims_root:/work/sysprims:ro" \
     rust:1.88-bookworm \
