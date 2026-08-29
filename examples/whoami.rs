@@ -63,6 +63,7 @@ fn main() {
         // want to send data to the child, you'd set `to_write` to
         // that data and do it like this:
         let to_write = "";
+        #[allow(clippy::const_is_empty)]
         if !to_write.is_empty() {
             // To avoid deadlock, wrt. reading and waiting, we send
             // data to the stdin of the child in a different thread.
@@ -89,6 +90,6 @@ fn main() {
     // printed out raw in another terminal.
     print!("output: ");
     for c in output.escape_debug() {
-        print!("{}", c);
+        print!("{c}");
     }
 }

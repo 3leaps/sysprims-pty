@@ -39,13 +39,381 @@
 //!
 use anyhow::Error;
 use downcast_rs::{impl_downcast, Downcast};
-#[cfg(unix)]
-use libc;
 #[cfg(feature = "serde_support")]
 use serde_derive::*;
 use std::io::Result as IoResult;
 #[cfg(windows)]
 use std::os::windows::prelude::{AsRawHandle, RawHandle};
+
+/// A PTY child whose exclusive reap ownership can be transferred to sysprims.
+///
+/// Callers receive this type only after a containment guard has finalized.
+/// While containment is active, the guard keeps the child handle private.
+#[derive(Debug)]
+pub struct ContainedPtyChild {
+    pub(crate) child: std::process::Child,
+}
+
+impl ContainedPtyChild {
+    #[cfg(unix)]
+    pub(crate) fn new(child: std::process::Child) -> Self {
+        Self { child }
+    }
+}
+
+/// Stage at which a guarded PTY spawn failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainedPtySpawnErrorStage {
+    /// No child was created.
+    BeforeSpawn,
+    /// The same-spawn receipt could not be validated.
+    Receipt,
+    /// The exact child and receipt could not be adopted into a guard.
+    Adoption,
+}
+
+#[cfg(unix)]
+enum FailedChildRecoveryCommand {
+    Adopt(ContainedPtyChild),
+    Attempt {
+        timeout: std::time::Duration,
+        #[cfg(test)]
+        fault: FailedChildRecoveryFault,
+        response: std::sync::mpsc::SyncSender<IoResult<bool>>,
+    },
+}
+
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy)]
+enum FailedChildRecoveryFault {
+    None,
+    KillError,
+    Deadline,
+}
+
+#[cfg(unix)]
+struct FailedChildRecovery {
+    sender: std::sync::mpsc::Sender<FailedChildRecoveryCommand>,
+    pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(unix)]
+impl FailedChildRecovery {
+    fn prepare() -> IoResult<Self> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_pending = std::sync::Arc::clone(&pending);
+        std::thread::Builder::new()
+            .name("sysprims-pty-recovery".to_string())
+            .spawn(move || failed_child_recovery_worker(receiver, worker_pending))?;
+        Ok(Self { sender, pending })
+    }
+
+    fn attach(&self, child: ContainedPtyChild) {
+        self.pending
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Err(error) = self.sender.send(FailedChildRecoveryCommand::Adopt(child)) {
+            let child = match error.0 {
+                FailedChildRecoveryCommand::Adopt(child) => child,
+                FailedChildRecoveryCommand::Attempt { .. } => unreachable!(),
+            };
+            bounded_local_recovery_or_abort(child);
+        }
+    }
+
+    fn attempt(&self, timeout: std::time::Duration) -> IoResult<bool> {
+        self.attempt_inner(
+            timeout,
+            #[cfg(test)]
+            FailedChildRecoveryFault::None,
+        )
+    }
+
+    fn attempt_inner(
+        &self,
+        timeout: std::time::Duration,
+        #[cfg(test)] fault: FailedChildRecoveryFault,
+    ) -> IoResult<bool> {
+        if !self.pending.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(true);
+        }
+
+        let timeout = timeout.min(std::time::Duration::from_secs(2));
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .send(FailedChildRecoveryCommand::Attempt {
+                timeout,
+                #[cfg(test)]
+                fault,
+                response,
+            })
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "exact-child recovery owner stopped",
+                )
+            })?;
+        result
+            .recv_timeout(timeout + std::time::Duration::from_millis(250))
+            .map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("exact-child recovery response unavailable: {error}"),
+                )
+            })?
+    }
+
+    #[cfg(test)]
+    fn attempt_with_fault(
+        &self,
+        timeout: std::time::Duration,
+        fault: FailedChildRecoveryFault,
+    ) -> IoResult<bool> {
+        self.attempt_inner(timeout, fault)
+    }
+
+    fn is_pending(&self) -> bool {
+        self.pending.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+#[cfg(unix)]
+fn failed_child_recovery_worker(
+    receiver: std::sync::mpsc::Receiver<FailedChildRecoveryCommand>,
+    pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let mut child = None;
+    while let Ok(command) = receiver.recv() {
+        match command {
+            FailedChildRecoveryCommand::Adopt(adopted) => {
+                debug_assert!(child.is_none());
+                child = Some(adopted);
+            }
+            FailedChildRecoveryCommand::Attempt {
+                timeout,
+                #[cfg(test)]
+                fault,
+                response,
+            } => {
+                let result = attempt_failed_child_recovery(
+                    &mut child,
+                    timeout,
+                    #[cfg(test)]
+                    fault,
+                );
+                pending.store(child.is_some(), std::sync::atomic::Ordering::Release);
+                let _ = response.send(result);
+            }
+        }
+    }
+
+    // Disconnect means the public error/controller was dropped. Ownership
+    // stays on this parent-side worker; the destructor itself never blocks.
+    while child.is_some() {
+        let _ = attempt_failed_child_recovery(
+            &mut child,
+            std::time::Duration::from_secs(2),
+            #[cfg(test)]
+            FailedChildRecoveryFault::None,
+        );
+        pending.store(child.is_some(), std::sync::atomic::Ordering::Release);
+        if child.is_some() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
+#[cfg(unix)]
+fn attempt_failed_child_recovery(
+    child: &mut Option<ContainedPtyChild>,
+    timeout: std::time::Duration,
+    #[cfg(test)] fault: FailedChildRecoveryFault,
+) -> IoResult<bool> {
+    let owned_child = match child.as_mut() {
+        Some(child) => child,
+        None => return Ok(true),
+    };
+
+    if owned_child.child.try_wait()?.is_some() {
+        child.take();
+        return Ok(true);
+    }
+
+    #[cfg(test)]
+    match fault {
+        FailedChildRecoveryFault::KillError => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected exact-child kill failure",
+            ));
+        }
+        FailedChildRecoveryFault::Deadline => {
+            std::thread::sleep(timeout.min(std::time::Duration::from_millis(10)));
+            return Ok(false);
+        }
+        FailedChildRecoveryFault::None => {}
+    }
+
+    // This is the exact spawn-owned std::process::Child handle. Never
+    // reconstruct signal authority from an observed PID.
+    owned_child.child.kill()?;
+
+    let timeout = timeout.min(std::time::Duration::from_secs(2));
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match owned_child.child.try_wait()? {
+            Some(_) => {
+                child.take();
+                return Ok(true);
+            }
+            None if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            None => return Ok(false),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn bounded_local_recovery_or_abort(mut child: ContainedPtyChild) -> ! {
+    let _ = child.child.kill();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match child.child.try_wait() {
+            Ok(Some(_)) => {
+                std::process::abort();
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Ok(None) | Err(_) => std::process::abort(),
+        }
+    }
+}
+
+/// Error from a guarded PTY spawn.
+///
+/// Errors after child creation retain an opaque exact-child recovery state.
+/// The active child handle is never returned to the caller or discarded.
+/// Dropping an error disconnects its bounded controller; a parent-side worker
+/// keeps exact-child ownership through direct kill and reap.
+pub struct ContainedPtySpawnError {
+    stage: ContainedPtySpawnErrorStage,
+    source: Error,
+    #[cfg(unix)]
+    recovery: Option<FailedChildRecovery>,
+}
+
+impl ContainedPtySpawnError {
+    pub(crate) fn before_spawn(source: Error) -> Self {
+        Self {
+            stage: ContainedPtySpawnErrorStage::BeforeSpawn,
+            source,
+            #[cfg(unix)]
+            recovery: None,
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn after_spawn(
+        stage: ContainedPtySpawnErrorStage,
+        source: Error,
+        child: ContainedPtyChild,
+        recovery: FailedChildRecovery,
+    ) -> Self {
+        debug_assert!(stage != ContainedPtySpawnErrorStage::BeforeSpawn);
+        recovery.attach(child);
+        let mut error = Self {
+            stage,
+            source,
+            recovery: Some(recovery),
+        };
+        let _ = error.recover(std::time::Duration::from_secs(2));
+        error
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn after_spawn_pending_for_test(
+        stage: ContainedPtySpawnErrorStage,
+        source: Error,
+        child: ContainedPtyChild,
+        recovery: FailedChildRecovery,
+    ) -> Self {
+        debug_assert!(stage != ContainedPtySpawnErrorStage::BeforeSpawn);
+        recovery.attach(child);
+        Self {
+            stage,
+            source,
+            recovery: Some(recovery),
+        }
+    }
+
+    /// Report the stage at which the spawn failed.
+    pub fn stage(&self) -> ContainedPtySpawnErrorStage {
+        self.stage
+    }
+
+    /// Whether exact-child recovery is still in progress.
+    pub fn recovery_pending(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.recovery
+                .as_ref()
+                .is_some_and(FailedChildRecovery::is_pending)
+        }
+
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    /// Make one bounded exact-child recovery attempt.
+    ///
+    /// The attempt is capped at two seconds. Returns `true` when no child
+    /// remains to reap.
+    pub fn recover(&mut self, timeout: std::time::Duration) -> IoResult<bool> {
+        #[cfg(unix)]
+        {
+            match self.recovery.as_mut() {
+                Some(recovery) => recovery.attempt(timeout),
+                None => Ok(true),
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = timeout;
+            Ok(true)
+        }
+    }
+}
+
+impl std::fmt::Debug for ContainedPtySpawnError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ContainedPtySpawnError")
+            .field("stage", &self.stage)
+            .field("source", &self.source)
+            .field("recovery_pending", &self.recovery_pending())
+            .finish()
+    }
+}
+
+impl std::fmt::Display for ContainedPtySpawnError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for ContainedPtySpawnError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+/// An owned, spawn-time-acquired PTY containment capability.
+pub type ContainedPtyGuard = sysprims_timeout::ContainmentGuard<ContainedPtyChild>;
 
 pub mod cmdbuilder;
 pub use cmdbuilder::CommandBuilder;
@@ -163,6 +531,20 @@ impl_downcast!(ChildKiller);
 pub trait SlavePty {
     /// Spawns the command specified by the provided CommandBuilder
     fn spawn_command(&self, cmd: CommandBuilder) -> Result<Box<dyn Child + Send + Sync>, Error>;
+
+    /// Spawns a command with a sealed same-spawn sysprims containment guard.
+    ///
+    /// Native Unix PTYs provide guaranteed spawn-time acquisition. Other PTY
+    /// implementations reject this operation before spawning a process.
+    fn spawn_contained_command(
+        &self,
+        cmd: CommandBuilder,
+    ) -> Result<ContainedPtyGuard, ContainedPtySpawnError> {
+        let _ = cmd;
+        Err(ContainedPtySpawnError::before_spawn(anyhow::anyhow!(
+            "spawn-time PTY containment is unavailable for this PTY implementation"
+        )))
+    }
 }
 
 /// Represents the exit status of a child process.
@@ -214,7 +596,7 @@ impl From<std::process::ExitStatus> for ExitStatus {
             if let Some(signal) = status.signal() {
                 let signame = unsafe { libc::strsignal(signal) };
                 let signal = if signame.is_null() {
-                    format!("Signal {}", signal)
+                    format!("Signal {signal}")
                 } else {
                     let signame = unsafe { std::ffi::CStr::from_ptr(signame) };
                     signame.to_string_lossy().to_string()
@@ -243,7 +625,7 @@ impl std::fmt::Display for ExitStatus {
             write!(fmt, "Success")
         } else {
             match &self.signal {
-                Some(sig) => write!(fmt, "Terminated by {}", sig),
+                Some(sig) => write!(fmt, "Terminated by {sig}"),
                 None => write!(fmt, "Exited with code {}", self.code),
             }
         }
@@ -270,10 +652,7 @@ impl_downcast!(PtySystem);
 
 impl Child for std::process::Child {
     fn try_wait(&mut self) -> IoResult<Option<ExitStatus>> {
-        std::process::Child::try_wait(self).map(|s| match s {
-            Some(s) => Some(s.into()),
-            None => None,
-        })
+        std::process::Child::try_wait(self).map(|status| status.map(Into::into))
     }
 
     fn wait(&mut self) -> IoResult<ExitStatus> {
@@ -287,6 +666,44 @@ impl Child for std::process::Child {
     #[cfg(windows)]
     fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
         Some(std::os::windows::io::AsRawHandle::as_raw_handle(self))
+    }
+}
+
+impl Child for ContainedPtyChild {
+    fn try_wait(&mut self) -> IoResult<Option<ExitStatus>> {
+        std::process::Child::try_wait(&mut self.child).map(|status| status.map(Into::into))
+    }
+
+    fn wait(&mut self) -> IoResult<ExitStatus> {
+        std::process::Child::wait(&mut self.child).map(Into::into)
+    }
+
+    fn process_id(&self) -> Option<u32> {
+        Some(self.child.id())
+    }
+
+    #[cfg(windows)]
+    fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+        Some(std::os::windows::io::AsRawHandle::as_raw_handle(
+            &self.child,
+        ))
+    }
+}
+
+impl sysprims_timeout::ContainmentChild for ContainedPtyChild {
+    fn process_id(&self) -> Option<u32> {
+        Some(self.child.id())
+    }
+
+    fn try_wait(&mut self) -> IoResult<bool> {
+        std::process::Child::try_wait(&mut self.child).map(|status| status.is_some())
+    }
+
+    #[cfg(windows)]
+    fn raw_process_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+        Some(std::os::windows::io::AsRawHandle::as_raw_handle(
+            &self.child,
+        ))
     }
 }
 
@@ -394,6 +811,16 @@ impl ChildKiller for std::process::Child {
         Box::new(ProcessSignaller {
             pid: self.process_id(),
         })
+    }
+}
+
+impl ChildKiller for ContainedPtyChild {
+    fn kill(&mut self) -> IoResult<()> {
+        ChildKiller::kill(&mut self.child)
+    }
+
+    fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+        ChildKiller::clone_killer(&self.child)
     }
 }
 

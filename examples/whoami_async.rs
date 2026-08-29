@@ -63,7 +63,7 @@ fn main() -> anyhow::Result<()> {
             // printed out raw in another terminal.
             print!("output: len={} ", line.len());
             for c in line.escape_debug() {
-                print!("{}", c);
+                print!("{c}");
             }
             println!();
         }

@@ -11,20 +11,25 @@
 
 [package]
 edition = "2018"
-name = "portable-pty"
+rust-version = "1.88.0"
+name = "sysprims-pty"
 version = "0.9.0"
-authors = ["Wez Furlong"]
+authors = [
+    "Wez Furlong",
+    "3 Leaps, LLC",
+]
 build = false
 autolib = false
 autobins = false
 autoexamples = false
-autotests = false
+autotests = true
 autobenches = false
-description = "Cross platform pty interface"
-documentation = "https://docs.rs/portable-pty"
-readme = false
+description = "Cross-platform PTY interface with sysprims containment"
+documentation = "https://docs.rs/sysprims-pty"
+readme = "README.md"
+exclude = ["Cargo.toml.orig"]
 license = "MIT"
-repository = "https://github.com/wezterm/wezterm"
+repository = "https://github.com/3leaps/sysprims-pty"
 resolver = "2"
 
 [lib]
@@ -83,6 +88,11 @@ version = "0.2"
 [dependencies.shell-words]
 version = "1.1"
 
+[dependencies.sysprims-timeout]
+git = "https://github.com/3leaps/sysprims"
+rev = "1e56e8b7fbe004a0a1b028b81ba11193e1dd71ff"
+version = "=0.2.2"
+
 [dev-dependencies.futures]
 version = "0.3"
 
@@ -118,3 +128,8 @@ features = [
 
 [target."cfg(windows)".dependencies.winreg]
 version = "0.10"
+
+[target."cfg(unix)".dependencies.sysprims-session]
+git = "https://github.com/3leaps/sysprims"
+rev = "1e56e8b7fbe004a0a1b028b81ba11193e1dd71ff"
+version = "=0.2.2"

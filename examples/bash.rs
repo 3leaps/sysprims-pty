@@ -38,10 +38,10 @@ fn main() {
                 Ok(0) => break, // EOF
                 Ok(n) => {
                     let output = String::from_utf8_lossy(&buffer[..n]);
-                    println!("{}", output); // Print to stdout for visibility.
+                    println!("{output}"); // Print to stdout for visibility.
                 }
                 Err(e) => {
-                    eprintln!("Error reading from PTY: {}", e);
+                    eprintln!("Error reading from PTY: {e}");
                     break;
                 }
             }
@@ -72,7 +72,7 @@ fn main() {
 
     println!("Waiting for Bash to exit...");
     let status = child.wait().unwrap();
-    println!("Bash exited with status: {:?}", status);
+    println!("Bash exited with status: {status:?}");
 }
 
 fn handle_input_stream(rx: std::sync::mpsc::Receiver<String>, mut writer: Box<dyn Write + Send>) {

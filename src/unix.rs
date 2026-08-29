@@ -1,6 +1,10 @@
 //! Working with pseudo-terminals
 
-use crate::{Child, CommandBuilder, MasterPty, PtyPair, PtySize, PtySystem, SlavePty};
+use crate::{
+    Child, CommandBuilder, ContainedPtyChild, ContainedPtyGuard, ContainedPtySpawnError,
+    ContainedPtySpawnErrorStage, FailedChildRecovery, MasterPty, PtyPair, PtySize, PtySystem,
+    SlavePty,
+};
 use anyhow::{bail, Error};
 use filedescriptor::FileDescriptor;
 use libc::{self, winsize};
@@ -296,6 +300,144 @@ impl PtyFd {
 
         Ok(child)
     }
+
+    fn spawn_contained_command(
+        &self,
+        builder: CommandBuilder,
+    ) -> Result<ContainedPtyGuard, ContainedPtySpawnError> {
+        self.spawn_contained_command_with_fault(builder, ContainedSpawnFault::None)
+    }
+
+    fn spawn_contained_command_with_fault(
+        &self,
+        builder: CommandBuilder,
+        _fault: ContainedSpawnFault,
+    ) -> Result<ContainedPtyGuard, ContainedPtySpawnError> {
+        let configured_umask = builder.umask;
+        let mut cmd = builder
+            .as_command()
+            .map_err(ContainedPtySpawnError::before_spawn)?;
+        let controlling_tty = builder.get_controlling_tty();
+        let (hook, pending_receipt) = sysprims_session::prepare_session_acquisition()
+            .map_err(|error| ContainedPtySpawnError::before_spawn(error.into()))?;
+
+        unsafe {
+            cmd.stdin(
+                self.as_stdio()
+                    .map_err(|error| ContainedPtySpawnError::before_spawn(error.into()))?,
+            )
+            .stdout(
+                self.as_stdio()
+                    .map_err(|error| ContainedPtySpawnError::before_spawn(error.into()))?,
+            )
+            .stderr(
+                self.as_stdio()
+                    .map_err(|error| ContainedPtySpawnError::before_spawn(error.into()))?,
+            )
+            .pre_exec(move || {
+                // Match the legacy PTY spawn's signal reset without
+                // allocating or consulting lock-backed state.
+                for signo in &[
+                    libc::SIGCHLD,
+                    libc::SIGHUP,
+                    libc::SIGINT,
+                    libc::SIGQUIT,
+                    libc::SIGTERM,
+                    libc::SIGALRM,
+                ] {
+                    libc::signal(*signo, libc::SIG_DFL);
+                }
+
+                let empty_set: libc::sigset_t = std::mem::zeroed();
+                libc::sigprocmask(libc::SIG_SETMASK, &empty_set, std::ptr::null_mut());
+
+                // This hook replaces the legacy setsid() slot. It is the
+                // only session or process-group acquirer for this spawn.
+                hook.acquire()?;
+
+                #[allow(clippy::cast_lossless)]
+                if controlling_tty && libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+
+                // The PTY and sysprims companion descriptors are prepared
+                // with CLOEXEC. Avoid portable-pty's allocation-backed
+                // /dev/fd traversal in this post-fork path.
+                if let Some(mask) = configured_umask {
+                    libc::umask(mask);
+                }
+
+                Ok(())
+            });
+        }
+
+        // Establish the parent-side exact-child recovery owner before spawn.
+        // If the spawn succeeds, the idle owner exits when this controller is
+        // dropped. If post-spawn validation fails, it receives the only Child.
+        let recovery = FailedChildRecovery::prepare()
+            .map_err(|error| ContainedPtySpawnError::before_spawn(error.into()))?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|error| ContainedPtySpawnError::before_spawn(error.into()))?;
+        child.stdin.take();
+        child.stdout.take();
+        child.stderr.take();
+
+        let child = ContainedPtyChild::new(child);
+        #[cfg(test)]
+        if _fault == ContainedSpawnFault::Receipt {
+            drop(pending_receipt);
+            return Err(ContainedPtySpawnError::after_spawn_pending_for_test(
+                ContainedPtySpawnErrorStage::Receipt,
+                anyhow::anyhow!("injected receipt failure"),
+                child,
+                recovery,
+            ));
+        }
+        let receipt = match pending_receipt.into_receipt(child.child.id()) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                return Err(ContainedPtySpawnError::after_spawn(
+                    ContainedPtySpawnErrorStage::Receipt,
+                    error.into(),
+                    child,
+                    recovery,
+                ));
+            }
+        };
+
+        #[cfg(test)]
+        if _fault == ContainedSpawnFault::Adoption {
+            let _receipt = receipt;
+            return Err(ContainedPtySpawnError::after_spawn_pending_for_test(
+                ContainedPtySpawnErrorStage::Adoption,
+                anyhow::anyhow!("injected adoption failure"),
+                child,
+                recovery,
+            ));
+        }
+
+        // SAFETY: `receipt` was sealed by this exact spawn's one-shot hook,
+        // and `child` is its exclusive, unreaped std::process::Child owner.
+        match unsafe { sysprims_timeout::contain_acquired_session(child, receipt) } {
+            Ok(guard) => Ok(guard),
+            Err(adoption) => Err(ContainedPtySpawnError::after_spawn(
+                ContainedPtySpawnErrorStage::Adoption,
+                adoption.error.into(),
+                adoption.child,
+                recovery,
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContainedSpawnFault {
+    None,
+    #[cfg(test)]
+    Receipt,
+    #[cfg(test)]
+    Adoption,
 }
 
 /// Represents the master end of a pty.
@@ -337,6 +479,13 @@ impl SlavePty for UnixSlavePty {
         builder: CommandBuilder,
     ) -> Result<Box<dyn Child + Send + Sync>, Error> {
         Ok(Box::new(self.fd.spawn_command(builder)?))
+    }
+
+    fn spawn_contained_command(
+        &self,
+        builder: CommandBuilder,
+    ) -> Result<ContainedPtyGuard, ContainedPtySpawnError> {
+        self.fd.spawn_contained_command(builder)
     }
 }
 
@@ -410,5 +559,90 @@ impl Write for UnixMasterWriter {
     }
     fn flush(&mut self) -> Result<(), io::Error> {
         self.fd.flush()
+    }
+}
+
+#[cfg(test)]
+mod contained_spawn_failure_tests {
+    use super::*;
+    use crate::FailedChildRecoveryFault;
+
+    fn injected_failure(
+        fault: ContainedSpawnFault,
+        stage: ContainedPtySpawnErrorStage,
+    ) -> (ContainedPtySpawnError, UnixMasterPty) {
+        let (master, slave) = openpty(PtySize::default()).unwrap();
+        let mut command = CommandBuilder::new("/usr/bin/perl");
+        command.args(["-e", "sleep 60"]);
+
+        let error = match slave.fd.spawn_contained_command_with_fault(command, fault) {
+            Ok(_) => panic!("injected failure returned a guard"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.stage(), stage);
+        assert!(
+            error.recovery_pending(),
+            "injected live child was not retained by the error state"
+        );
+        (error, master)
+    }
+
+    fn wait_for_recovery_owner(pending: &std::sync::atomic::AtomicBool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while pending.load(std::sync::atomic::Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "detached exact-child recovery owner did not reap"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn receipt_failure_retains_child_across_kill_error() {
+        let (mut error, _master) = injected_failure(
+            ContainedSpawnFault::Receipt,
+            ContainedPtySpawnErrorStage::Receipt,
+        );
+        let injected = error.recovery.as_ref().unwrap().attempt_with_fault(
+            std::time::Duration::from_millis(10),
+            FailedChildRecoveryFault::KillError,
+        );
+        assert!(injected.is_err());
+        assert!(error.recovery_pending());
+        assert!(
+            error.recover(std::time::Duration::from_secs(2)).unwrap(),
+            "exact-child recovery did not reach reap"
+        );
+        assert!(!error.recovery_pending());
+    }
+
+    #[test]
+    fn adoption_failure_deadline_transfers_to_bounded_drop_owner() {
+        let (error, _master) = injected_failure(
+            ContainedSpawnFault::Adoption,
+            ContainedPtySpawnErrorStage::Adoption,
+        );
+        let completed = error
+            .recovery
+            .as_ref()
+            .unwrap()
+            .attempt_with_fault(
+                std::time::Duration::from_millis(10),
+                FailedChildRecoveryFault::Deadline,
+            )
+            .unwrap();
+        assert!(!completed);
+        assert!(error.recovery_pending());
+
+        let pending = std::sync::Arc::clone(&error.recovery.as_ref().unwrap().pending);
+        let started = std::time::Instant::now();
+        drop(error);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "pending-error destructor blocked"
+        );
+        wait_for_recovery_owner(&pending);
     }
 }

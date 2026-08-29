@@ -22,6 +22,7 @@ use winapi::um::winbase::{
 use winapi::um::wincon::COORD;
 use winapi::um::winnt::HANDLE;
 
+#[allow(clippy::upper_case_acronyms)]
 pub type HPCON = HANDLE;
 
 pub const PSUEDOCONSOLE_INHERIT_CURSOR: DWORD = 0x1;
