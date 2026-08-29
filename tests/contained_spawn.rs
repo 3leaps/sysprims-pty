@@ -158,11 +158,18 @@ mod unix {
     fn presentation_handles_can_close_before_guard() {
         let _serial = serialize_process_test();
         let pair = native_pty_system().openpty(PtySize::default()).unwrap();
-        let command = CommandBuilder::new("/bin/sleep");
-        let mut command = command;
-        command.arg("60");
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut command = CommandBuilder::new("/usr/bin/perl");
+        command.args([
+            "-e",
+            "$SIG{HUP} = 'IGNORE'; $| = 1; print \"READY\\n\"; sleep 60",
+        ]);
 
         let mut guard = pair.slave.spawn_contained_command(command).unwrap();
+        let mut ready = [0_u8; 64];
+        let count = reader.read(&mut ready).unwrap();
+        assert!(String::from_utf8_lossy(&ready[..count]).contains("READY"));
+        drop(reader);
         drop(pair);
 
         let outcome = guard.terminate(quick_termination()).unwrap();
