@@ -3,6 +3,8 @@
 This source tree is derived from the `portable-pty` 0.9.0 crate.
 
 - Upstream repository: <https://github.com/wezterm/wezterm>
+- Published crate SHA-256:
+  `b4a596a2b3d2752d94f51fac2d4a96737b8705dddd311a32b9af47211f08671e`
 - Upstream workspace path: `pty`
 - Upstream source revision:
   `f8921727a11b9f8b073e8c24821d72fd41283500`
