@@ -90,6 +90,6 @@ fn main() {
     // printed out raw in another terminal.
     print!("output: ");
     for c in output.escape_debug() {
-        print!("{}", c);
+        print!("{c}");
     }
 }
