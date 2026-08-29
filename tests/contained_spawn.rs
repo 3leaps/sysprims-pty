@@ -256,3 +256,226 @@ fn guaranteed_conpty_containment_owns_job_and_child() {
     );
     let _ = std::fs::remove_file(marker);
 }
+
+#[cfg(windows)]
+fn windows_fixture_path(label: &str) -> std::path::PathBuf {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    std::env::temp_dir().join(format!(
+        "sysprims-pty-{label}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos()
+    ))
+}
+
+#[cfg(windows)]
+fn wait_for_pid_file(path: &std::path::Path) -> u32 {
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(value) = std::fs::read_to_string(path) {
+            return value.trim().parse().expect("fixture PID is invalid");
+        }
+        assert!(Instant::now() < deadline, "fixture PID was not reported");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(windows)]
+fn open_process_for_wait(pid: u32) -> std::os::windows::io::OwnedHandle {
+    use std::os::windows::io::FromRawHandle;
+    use winapi::um::processthreadsapi::OpenProcess;
+    use winapi::um::winnt::{PROCESS_QUERY_LIMITED_INFORMATION, SYNCHRONIZE};
+
+    let handle = unsafe { OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    assert!(!handle.is_null(), "failed to open fixture process {}", pid);
+    unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle.cast()) }
+}
+
+#[cfg(windows)]
+fn assert_process_exited(handle: &std::os::windows::io::OwnedHandle) {
+    use std::os::windows::io::AsRawHandle;
+    use winapi::um::synchapi::WaitForSingleObject;
+    use winapi::um::winbase::WAIT_OBJECT_0;
+
+    let result = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 5_000) };
+    assert_eq!(result, WAIT_OBJECT_0, "Job member survived termination");
+}
+
+#[cfg(windows)]
+#[test]
+fn immediate_child_and_grandchild_remain_in_owned_job() {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use sysprims_timeout::{ContainmentCompletionEvidence, TerminateTreeConfig};
+
+    let child_pid_file = windows_fixture_path("child-pid");
+    let grandchild_pid_file = windows_fixture_path("grandchild-pid");
+    let mut command = CommandBuilder::new(std::env::current_exe().unwrap());
+    command.args(["--exact", "windows_tree_parent_helper", "--nocapture"]);
+    command.env("SYSPRIMS_PTY_TEST_MODE", "tree_parent");
+    command.env("SYSPRIMS_PTY_CHILD_PID_FILE", &child_pid_file);
+    command.env("SYSPRIMS_PTY_GRANDCHILD_PID_FILE", &grandchild_pid_file);
+
+    let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+    let mut guard = pair.slave.spawn_contained_command(command).unwrap();
+    let child_handle = open_process_for_wait(wait_for_pid_file(&child_pid_file));
+    let grandchild_handle = open_process_for_wait(wait_for_pid_file(&grandchild_pid_file));
+
+    let outcome = guard
+        .terminate(TerminateTreeConfig::default())
+        .expect("Job termination failed");
+    assert!(outcome.exited);
+    assert!(matches!(
+        outcome.completion,
+        ContainmentCompletionEvidence::Empty { .. }
+    ));
+    assert_process_exited(&child_handle);
+    assert_process_exited(&grandchild_handle);
+
+    let _ = std::fs::remove_file(child_pid_file);
+    let _ = std::fs::remove_file(grandchild_pid_file);
+}
+
+#[cfg(windows)]
+#[test]
+fn create_breakaway_from_job_cannot_escape() {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::time::{Duration, Instant};
+    use sysprims_timeout::TerminateTreeConfig;
+
+    let result_file = windows_fixture_path("breakaway-result");
+    let mut command = CommandBuilder::new(std::env::current_exe().unwrap());
+    command.args(["--exact", "windows_breakaway_parent_helper", "--nocapture"]);
+    command.env("SYSPRIMS_PTY_TEST_MODE", "breakaway_parent");
+    command.env("SYSPRIMS_PTY_BREAKAWAY_RESULT_FILE", &result_file);
+
+    let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+    let mut guard = pair.slave.spawn_contained_command(command).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let result = loop {
+        if let Ok(result) = std::fs::read_to_string(&result_file) {
+            break result;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "breakaway result was not reported"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+
+    let outcome = guard
+        .terminate(TerminateTreeConfig::default())
+        .expect("Job termination failed");
+    assert!(outcome.exited);
+    assert!(
+        result.starts_with("denied:"),
+        "CREATE_BREAKAWAY_FROM_JOB unexpectedly escaped: {}",
+        result
+    );
+    let _ = std::fs::remove_file(result_file);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_tree_parent_helper() {
+    if std::env::var("SYSPRIMS_PTY_TEST_MODE").as_deref() != Ok("tree_parent") {
+        return;
+    }
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "windows_tree_child_helper", "--nocapture"])
+        .env("SYSPRIMS_PTY_TEST_MODE", "tree_child")
+        .env(
+            "SYSPRIMS_PTY_CHILD_PID_FILE",
+            std::env::var_os("SYSPRIMS_PTY_CHILD_PID_FILE").unwrap(),
+        )
+        .env(
+            "SYSPRIMS_PTY_GRANDCHILD_PID_FILE",
+            std::env::var_os("SYSPRIMS_PTY_GRANDCHILD_PID_FILE").unwrap(),
+        )
+        .spawn()
+        .expect("failed to spawn immediate child helper");
+    child.wait().expect("immediate child wait failed");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_tree_child_helper() {
+    if std::env::var("SYSPRIMS_PTY_TEST_MODE").as_deref() != Ok("tree_child") {
+        return;
+    }
+    std::fs::write(
+        std::env::var_os("SYSPRIMS_PTY_CHILD_PID_FILE").unwrap(),
+        std::process::id().to_string(),
+    )
+    .expect("failed to write immediate child PID");
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "windows_tree_grandchild_helper", "--nocapture"])
+        .env("SYSPRIMS_PTY_TEST_MODE", "tree_grandchild")
+        .env(
+            "SYSPRIMS_PTY_GRANDCHILD_PID_FILE",
+            std::env::var_os("SYSPRIMS_PTY_GRANDCHILD_PID_FILE").unwrap(),
+        )
+        .spawn()
+        .expect("failed to spawn grandchild helper");
+    child.wait().expect("grandchild wait failed");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_tree_grandchild_helper() {
+    if std::env::var("SYSPRIMS_PTY_TEST_MODE").as_deref() != Ok("tree_grandchild") {
+        return;
+    }
+    std::fs::write(
+        std::env::var_os("SYSPRIMS_PTY_GRANDCHILD_PID_FILE").unwrap(),
+        std::process::id().to_string(),
+    )
+    .expect("failed to write grandchild PID");
+    std::thread::sleep(std::time::Duration::from_secs(30));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_breakaway_parent_helper() {
+    use std::os::windows::process::CommandExt;
+    use winapi::um::winbase::CREATE_BREAKAWAY_FROM_JOB;
+
+    if std::env::var("SYSPRIMS_PTY_TEST_MODE").as_deref() != Ok("breakaway_parent") {
+        return;
+    }
+    let result_file = std::env::var_os("SYSPRIMS_PTY_BREAKAWAY_RESULT_FILE").unwrap();
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "windows_breakaway_leaf_helper", "--nocapture"])
+        .env("SYSPRIMS_PTY_TEST_MODE", "breakaway_leaf")
+        .creation_flags(CREATE_BREAKAWAY_FROM_JOB)
+        .spawn();
+    match result {
+        Err(error) => {
+            std::fs::write(
+                result_file,
+                format!("denied:{}", error.raw_os_error().unwrap_or(0)),
+            )
+            .expect("failed to write breakaway denial");
+        }
+        Ok(mut escaped) => {
+            let pid = escaped.id();
+            let _ = escaped.kill();
+            let _ = escaped.wait();
+            std::fs::write(result_file, format!("escaped:{pid}"))
+                .expect("failed to write breakaway escape");
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_breakaway_leaf_helper() {
+    if std::env::var("SYSPRIMS_PTY_TEST_MODE").as_deref() != Ok("breakaway_leaf") {
+        return;
+    }
+    std::thread::sleep(std::time::Duration::from_secs(30));
+}
