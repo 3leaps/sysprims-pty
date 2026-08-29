@@ -22,7 +22,7 @@ shell-words = "1.1"
 serde_derive = {version="1.0", optional=true}
 serde = {version="1.0", optional=true}
 serial2 = "0.2"
-sysprims-timeout = { version = "=0.2.2", git = "https://github.com/3leaps/sysprims", rev = "419835f84466cb2e0b1ef9a9ed0592dcb3c4c4c8" }
+sysprims-timeout = { version = "=0.2.2", git = "https://github.com/3leaps/sysprims", rev = "7e5cc03847029dbd316d9f8c0887997bf64a247c" }
 
 [features]
 default = []
@@ -43,7 +43,7 @@ winapi = { version = "0.3", features = [
 winreg = "0.10"
 
 [target."cfg(unix)".dependencies]
-sysprims-session = { version = "=0.2.2", git = "https://github.com/3leaps/sysprims", rev = "419835f84466cb2e0b1ef9a9ed0592dcb3c4c4c8" }
+sysprims-session = { version = "=0.2.2", git = "https://github.com/3leaps/sysprims", rev = "7e5cc03847029dbd316d9f8c0887997bf64a247c" }
 
 [dev-dependencies]
 smol = "2.0"

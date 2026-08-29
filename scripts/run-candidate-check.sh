@@ -3,7 +3,7 @@ set -eu
 
 companion_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 sysprims_root=${SYSPRIMS_ROOT:-"$companion_root/../sysprims"}
-reviewed_sysprims_rev=419835f84466cb2e0b1ef9a9ed0592dcb3c4c4c8
+reviewed_sysprims_rev=7e5cc03847029dbd316d9f8c0887997bf64a247c
 
 actual_sysprims_rev=$(git -C "$sysprims_root" rev-parse HEAD)
 if [ "$actual_sysprims_rev" != "$reviewed_sysprims_rev" ]; then

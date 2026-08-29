@@ -25,5 +25,5 @@ The compatibility delta is intentionally narrow:
 - mechanical current-Clippy fixes that do not change behavior.
 
 The minimum sysprims contract is `v0.2.2`, commit
-`419835f84466cb2e0b1ef9a9ed0592dcb3c4c4c8`. Compatibility is also checked
+`7e5cc03847029dbd316d9f8c0887997bf64a247c`. Compatibility is also checked
 against that exact sysprims revision before a companion release is cut.
