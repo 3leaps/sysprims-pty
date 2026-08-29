@@ -20,6 +20,6 @@ The compatibility delta is intentionally narrow:
 - lifecycle, real-PTY, allocator-lock, and compatibility tests; and
 - mechanical current-Clippy fixes that do not change behavior.
 
-The minimum sysprims contract is `v0.2.1`, commit
-`0192fe424925f60536c5bdb93839eeb64175c857`. Compatibility is also checked
-against the intended sysprims candidate before a companion release is cut.
+The minimum sysprims contract is `v0.2.2`, commit
+`1e56e8b7fbe004a0a1b028b81ba11193e1dd71ff`. Compatibility is also checked
+against that exact sysprims revision before a companion release is cut.
