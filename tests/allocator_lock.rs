@@ -87,7 +87,11 @@ fn contained_pre_exec_does_not_touch_inherited_allocator_lock() {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if guard
-            .try_complete(TerminateTreeConfig::default())
+            .try_complete(TerminateTreeConfig {
+                grace_timeout_ms: 50,
+                kill_timeout_ms: 1_000,
+                ..TerminateTreeConfig::default()
+            })
             .unwrap()
             .is_some()
         {
