@@ -1,8 +1,8 @@
 //! Working with pseudo-terminals
 
 use crate::{
-    Child, CommandBuilder, ContainedPtyChild, ContainedPtyGuard, MasterPty, PtyPair, PtySize,
-    PtySystem, SlavePty,
+    Child, CommandBuilder, ContainedPtyChild, ContainedPtyGuard, ContainedPtySpawnError,
+    ContainedPtySpawnErrorStage, MasterPty, PtyPair, PtySize, PtySystem, SlavePty,
 };
 use anyhow::{bail, Error};
 use filedescriptor::FileDescriptor;
@@ -303,104 +303,131 @@ impl PtyFd {
     fn spawn_contained_command(
         &self,
         builder: CommandBuilder,
-    ) -> anyhow::Result<ContainedPtyGuard> {
+    ) -> Result<ContainedPtyGuard, ContainedPtySpawnError> {
+        self.spawn_contained_command_with_fault(builder, ContainedSpawnFault::None)
+    }
+
+    fn spawn_contained_command_with_fault(
+        &self,
+        builder: CommandBuilder,
+        _fault: ContainedSpawnFault,
+    ) -> Result<ContainedPtyGuard, ContainedPtySpawnError> {
         let configured_umask = builder.umask;
-        let mut cmd = builder.as_command()?;
+        let mut cmd = builder
+            .as_command()
+            .map_err(ContainedPtySpawnError::before_spawn)?;
         let controlling_tty = builder.get_controlling_tty();
-        let (hook, pending_receipt) = sysprims_session::prepare_session_acquisition()?;
+        let (hook, pending_receipt) = sysprims_session::prepare_session_acquisition()
+            .map_err(|error| ContainedPtySpawnError::before_spawn(error.into()))?;
 
         unsafe {
-            cmd.stdin(self.as_stdio()?)
-                .stdout(self.as_stdio()?)
-                .stderr(self.as_stdio()?)
-                .pre_exec(move || {
-                    // Match the legacy PTY spawn's signal reset without
-                    // allocating or consulting lock-backed state.
-                    for signo in &[
-                        libc::SIGCHLD,
-                        libc::SIGHUP,
-                        libc::SIGINT,
-                        libc::SIGQUIT,
-                        libc::SIGTERM,
-                        libc::SIGALRM,
-                    ] {
-                        libc::signal(*signo, libc::SIG_DFL);
-                    }
+            cmd.stdin(
+                self.as_stdio()
+                    .map_err(|error| ContainedPtySpawnError::before_spawn(error.into()))?,
+            )
+            .stdout(
+                self.as_stdio()
+                    .map_err(|error| ContainedPtySpawnError::before_spawn(error.into()))?,
+            )
+            .stderr(
+                self.as_stdio()
+                    .map_err(|error| ContainedPtySpawnError::before_spawn(error.into()))?,
+            )
+            .pre_exec(move || {
+                // Match the legacy PTY spawn's signal reset without
+                // allocating or consulting lock-backed state.
+                for signo in &[
+                    libc::SIGCHLD,
+                    libc::SIGHUP,
+                    libc::SIGINT,
+                    libc::SIGQUIT,
+                    libc::SIGTERM,
+                    libc::SIGALRM,
+                ] {
+                    libc::signal(*signo, libc::SIG_DFL);
+                }
 
-                    let empty_set: libc::sigset_t = std::mem::zeroed();
-                    libc::sigprocmask(libc::SIG_SETMASK, &empty_set, std::ptr::null_mut());
+                let empty_set: libc::sigset_t = std::mem::zeroed();
+                libc::sigprocmask(libc::SIG_SETMASK, &empty_set, std::ptr::null_mut());
 
-                    // This hook replaces the legacy setsid() slot. It is the
-                    // only session or process-group acquirer for this spawn.
-                    hook.acquire()?;
+                // This hook replaces the legacy setsid() slot. It is the
+                // only session or process-group acquirer for this spawn.
+                hook.acquire()?;
 
-                    #[allow(clippy::cast_lossless)]
-                    if controlling_tty && libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
-                        return Err(io::Error::last_os_error());
-                    }
+                #[allow(clippy::cast_lossless)]
+                if controlling_tty && libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
 
-                    // The PTY and sysprims companion descriptors are prepared
-                    // with CLOEXEC. Avoid portable-pty's allocation-backed
-                    // /dev/fd traversal in this post-fork path.
-                    if let Some(mask) = configured_umask {
-                        libc::umask(mask);
-                    }
+                // The PTY and sysprims companion descriptors are prepared
+                // with CLOEXEC. Avoid portable-pty's allocation-backed
+                // /dev/fd traversal in this post-fork path.
+                if let Some(mask) = configured_umask {
+                    libc::umask(mask);
+                }
 
-                    Ok(())
-                });
+                Ok(())
+            });
         }
 
-        let mut child = cmd.spawn()?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|error| ContainedPtySpawnError::before_spawn(error.into()))?;
         child.stdin.take();
         child.stdout.take();
         child.stderr.take();
 
         let child = ContainedPtyChild::new(child);
+        #[cfg(test)]
+        if _fault == ContainedSpawnFault::Receipt {
+            drop(pending_receipt);
+            return Err(ContainedPtySpawnError::after_spawn_pending_for_test(
+                ContainedPtySpawnErrorStage::Receipt,
+                anyhow::anyhow!("injected receipt failure"),
+                child,
+            ));
+        }
         let receipt = match pending_receipt.into_receipt(child.child.id()) {
             Ok(receipt) => receipt,
             Err(error) => {
-                cleanup_failed_spawn_child(child);
-                return Err(error.into());
+                return Err(ContainedPtySpawnError::after_spawn(
+                    ContainedPtySpawnErrorStage::Receipt,
+                    error.into(),
+                    child,
+                ));
             }
         };
+
+        #[cfg(test)]
+        if _fault == ContainedSpawnFault::Adoption {
+            let _receipt = receipt;
+            return Err(ContainedPtySpawnError::after_spawn_pending_for_test(
+                ContainedPtySpawnErrorStage::Adoption,
+                anyhow::anyhow!("injected adoption failure"),
+                child,
+            ));
+        }
 
         // SAFETY: `receipt` was sealed by this exact spawn's one-shot hook,
         // and `child` is its exclusive, unreaped std::process::Child owner.
         match unsafe { sysprims_timeout::contain_acquired_session(child, receipt) } {
             Ok(guard) => Ok(guard),
-            Err(adoption) => {
-                cleanup_failed_spawn_child(adoption.child);
-                Err(adoption.error.into())
-            }
+            Err(adoption) => Err(ContainedPtySpawnError::after_spawn(
+                ContainedPtySpawnErrorStage::Adoption,
+                adoption.error.into(),
+                adoption.child,
+            )),
         }
     }
 }
 
-fn cleanup_failed_spawn_child(mut child: ContainedPtyChild) {
-    match child.child.try_wait() {
-        Ok(Some(_)) => return,
-        Ok(None) => {
-            // Keep the exact handle even if the direct kill races with exit;
-            // a bounded reap attempt still follows.
-            let _ = child.child.kill();
-        }
-        Err(_) => {
-            // Ownership could not be confirmed through the exact child
-            // handle. Never reconstruct signal authority from a raw PID.
-            return;
-        }
-    }
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        match child.child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            Ok(None) | Err(_) => return,
-        }
-    }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContainedSpawnFault {
+    None,
+    #[cfg(test)]
+    Receipt,
+    #[cfg(test)]
+    Adoption,
 }
 
 /// Represents the master end of a pty.
@@ -444,7 +471,10 @@ impl SlavePty for UnixSlavePty {
         Ok(Box::new(self.fd.spawn_command(builder)?))
     }
 
-    fn spawn_contained_command(&self, builder: CommandBuilder) -> Result<ContainedPtyGuard, Error> {
+    fn spawn_contained_command(
+        &self,
+        builder: CommandBuilder,
+    ) -> Result<ContainedPtyGuard, ContainedPtySpawnError> {
         self.fd.spawn_contained_command(builder)
     }
 }
@@ -519,5 +549,48 @@ impl Write for UnixMasterWriter {
     }
     fn flush(&mut self) -> Result<(), io::Error> {
         self.fd.flush()
+    }
+}
+
+#[cfg(test)]
+mod contained_spawn_failure_tests {
+    use super::*;
+
+    fn assert_injected_failure(fault: ContainedSpawnFault, stage: ContainedPtySpawnErrorStage) {
+        let (_master, slave) = openpty(PtySize::default()).unwrap();
+        let mut command = CommandBuilder::new("/usr/bin/perl");
+        command.args(["-e", "sleep 60"]);
+
+        let mut error = match slave.fd.spawn_contained_command_with_fault(command, fault) {
+            Ok(_) => panic!("injected failure returned a guard"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.stage(), stage);
+        assert!(
+            error.recovery_pending(),
+            "injected live child was not retained by the error state"
+        );
+        assert!(
+            error.recover(std::time::Duration::from_secs(2)).unwrap(),
+            "exact-child recovery did not reach reap"
+        );
+        assert!(!error.recovery_pending());
+    }
+
+    #[test]
+    fn receipt_failure_retains_and_resolves_exact_child() {
+        assert_injected_failure(
+            ContainedSpawnFault::Receipt,
+            ContainedPtySpawnErrorStage::Receipt,
+        );
+    }
+
+    #[test]
+    fn adoption_failure_retains_and_resolves_exact_child() {
+        assert_injected_failure(
+            ContainedSpawnFault::Adoption,
+            ContainedPtySpawnErrorStage::Adoption,
+        );
     }
 }

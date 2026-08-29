@@ -61,6 +61,171 @@ impl ContainedPtyChild {
     }
 }
 
+/// Stage at which a guarded PTY spawn failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainedPtySpawnErrorStage {
+    /// No child was created.
+    BeforeSpawn,
+    /// The same-spawn receipt could not be validated.
+    Receipt,
+    /// The exact child and receipt could not be adopted into a guard.
+    Adoption,
+}
+
+struct FailedChildRecovery {
+    child: Option<ContainedPtyChild>,
+}
+
+impl FailedChildRecovery {
+    #[cfg(unix)]
+    fn new(child: ContainedPtyChild) -> Self {
+        let mut recovery = Self { child: Some(child) };
+        let _ = recovery.attempt(std::time::Duration::from_secs(2));
+        recovery
+    }
+
+    fn attempt(&mut self, timeout: std::time::Duration) -> IoResult<bool> {
+        let child = match self.child.as_mut() {
+            Some(child) => child,
+            None => return Ok(true),
+        };
+
+        match child.child.try_wait()? {
+            Some(_) => {
+                self.child.take();
+                return Ok(true);
+            }
+            None => {
+                // This is the exact spawn-owned std::process::Child handle.
+                // Never reconstruct signal authority from an observed PID.
+                let _ = child.child.kill();
+            }
+        }
+
+        let timeout = timeout.min(std::time::Duration::from_secs(2));
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match child.child.try_wait()? {
+                Some(_) => {
+                    self.child.take();
+                    return Ok(true);
+                }
+                None if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                None => return Ok(false),
+            }
+        }
+    }
+}
+
+impl Drop for FailedChildRecovery {
+    fn drop(&mut self) {
+        while self.child.is_some() {
+            let _ = self.attempt(std::time::Duration::from_secs(2));
+            if self.child.is_some() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+}
+
+/// Error from a guarded PTY spawn.
+///
+/// Errors after child creation retain an opaque exact-child recovery state.
+/// The active child handle is never returned to the caller or discarded.
+/// Dropping an error with pending recovery keeps retrying direct exact-child
+/// kill and reap; it never falls back to reconstructed process authority.
+pub struct ContainedPtySpawnError {
+    stage: ContainedPtySpawnErrorStage,
+    source: Error,
+    recovery: Option<FailedChildRecovery>,
+}
+
+impl ContainedPtySpawnError {
+    pub(crate) fn before_spawn(source: Error) -> Self {
+        Self {
+            stage: ContainedPtySpawnErrorStage::BeforeSpawn,
+            source,
+            recovery: None,
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn after_spawn(
+        stage: ContainedPtySpawnErrorStage,
+        source: Error,
+        child: ContainedPtyChild,
+    ) -> Self {
+        debug_assert!(stage != ContainedPtySpawnErrorStage::BeforeSpawn);
+        Self {
+            stage,
+            source,
+            recovery: Some(FailedChildRecovery::new(child)),
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn after_spawn_pending_for_test(
+        stage: ContainedPtySpawnErrorStage,
+        source: Error,
+        child: ContainedPtyChild,
+    ) -> Self {
+        debug_assert!(stage != ContainedPtySpawnErrorStage::BeforeSpawn);
+        Self {
+            stage,
+            source,
+            recovery: Some(FailedChildRecovery { child: Some(child) }),
+        }
+    }
+
+    /// Report the stage at which the spawn failed.
+    pub fn stage(&self) -> ContainedPtySpawnErrorStage {
+        self.stage
+    }
+
+    /// Whether exact-child recovery is still in progress.
+    pub fn recovery_pending(&self) -> bool {
+        self.recovery
+            .as_ref()
+            .is_some_and(|recovery| recovery.child.is_some())
+    }
+
+    /// Make one bounded exact-child recovery attempt.
+    ///
+    /// The attempt is capped at two seconds. Returns `true` when no child
+    /// remains to reap.
+    pub fn recover(&mut self, timeout: std::time::Duration) -> IoResult<bool> {
+        match self.recovery.as_mut() {
+            Some(recovery) => recovery.attempt(timeout),
+            None => Ok(true),
+        }
+    }
+}
+
+impl std::fmt::Debug for ContainedPtySpawnError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ContainedPtySpawnError")
+            .field("stage", &self.stage)
+            .field("source", &self.source)
+            .field("recovery_pending", &self.recovery_pending())
+            .finish()
+    }
+}
+
+impl std::fmt::Display for ContainedPtySpawnError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for ContainedPtySpawnError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
 /// An owned, spawn-time-acquired PTY containment capability.
 pub type ContainedPtyGuard = sysprims_timeout::ContainmentGuard<ContainedPtyChild>;
 
@@ -185,11 +350,14 @@ pub trait SlavePty {
     ///
     /// Native Unix PTYs provide guaranteed spawn-time acquisition. Other PTY
     /// implementations reject this operation before spawning a process.
-    fn spawn_contained_command(&self, cmd: CommandBuilder) -> Result<ContainedPtyGuard, Error> {
+    fn spawn_contained_command(
+        &self,
+        cmd: CommandBuilder,
+    ) -> Result<ContainedPtyGuard, ContainedPtySpawnError> {
         let _ = cmd;
-        Err(anyhow::anyhow!(
+        Err(ContainedPtySpawnError::before_spawn(anyhow::anyhow!(
             "spawn-time PTY containment is unavailable for this PTY implementation"
-        ))
+        )))
     }
 }
 
