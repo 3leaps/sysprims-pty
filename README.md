@@ -14,17 +14,10 @@ product: this crate does not promise identity with upstream `portable-pty`,
 and it adds what portable-pty leaves to you — race-free contained spawn and
 an owned, verifiable process lifecycle.
 
-```toml
-# Cargo.toml
-sysprims-pty = "0.9.0"
-```
-
-The library target is still named `portable_pty`, so existing imports can
-keep working:
-
-```toml
-portable_pty = { package = "sysprims-pty", version = "0.9.0" }
-```
+The package name is `sysprims-pty`. The library target is `portable_pty`,
+so existing `portable_pty` imports can keep working after a package rename.
+crates.io version coordinates will appear at first publish; they are not
+resolvable yet.
 
 ## What you can build
 
@@ -32,8 +25,11 @@ One launch, one owned session, one honest final outcome. Use it for an agent
 console, IDE terminal panel, interactive test harness, REPL supervisor, or
 task runner that:
 
-1. asks whether contained spawn is supported before starting,
-2. starts the session in a single spawn-time transaction,
+1. calls `SlavePty::spawn_contained_command` — unsupported implementations
+   reject before spawning; there is no separate support-query API in this
+   tree,
+2. on success, holds an owned `ContainmentGuard<ContainedPtyChild>` from
+   that single spawn-time transaction,
 3. talks to the PTY with opaque byte I/O and resize,
 4. closes explicitly or lets the leader complete naturally,
 5. reads containment, completion, and reap evidence with no process-group,
