@@ -26,17 +26,15 @@ mod unix {
         guard: &mut portable_pty::ContainedPtyGuard,
     ) -> sysprims_timeout::ContainmentOutcome {
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut last_error = None;
         loop {
             match guard.try_complete(quick_termination()) {
                 Ok(Some(outcome)) => return outcome,
                 Ok(None) => {}
-                Err(error) => last_error = Some(error),
+                Err(error) => panic!("contained PTY completion failed: {:?}", error),
             }
             assert!(
                 Instant::now() < deadline,
-                "contained PTY child did not complete: {:?}",
-                last_error
+                "contained PTY child did not complete"
             );
             std::thread::sleep(Duration::from_millis(10));
         }

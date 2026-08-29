@@ -2,7 +2,8 @@
 
 use crate::{
     Child, CommandBuilder, ContainedPtyChild, ContainedPtyGuard, ContainedPtySpawnError,
-    ContainedPtySpawnErrorStage, MasterPty, PtyPair, PtySize, PtySystem, SlavePty,
+    ContainedPtySpawnErrorStage, FailedChildRecovery, MasterPty, PtyPair, PtySize, PtySystem,
+    SlavePty,
 };
 use anyhow::{bail, Error};
 use filedescriptor::FileDescriptor;
@@ -370,6 +371,11 @@ impl PtyFd {
             });
         }
 
+        // Establish the parent-side exact-child recovery owner before spawn.
+        // If the spawn succeeds, the idle owner exits when this controller is
+        // dropped. If post-spawn validation fails, it receives the only Child.
+        let recovery = FailedChildRecovery::prepare()
+            .map_err(|error| ContainedPtySpawnError::before_spawn(error.into()))?;
         let mut child = cmd
             .spawn()
             .map_err(|error| ContainedPtySpawnError::before_spawn(error.into()))?;
@@ -385,6 +391,7 @@ impl PtyFd {
                 ContainedPtySpawnErrorStage::Receipt,
                 anyhow::anyhow!("injected receipt failure"),
                 child,
+                recovery,
             ));
         }
         let receipt = match pending_receipt.into_receipt(child.child.id()) {
@@ -394,6 +401,7 @@ impl PtyFd {
                     ContainedPtySpawnErrorStage::Receipt,
                     error.into(),
                     child,
+                    recovery,
                 ));
             }
         };
@@ -405,6 +413,7 @@ impl PtyFd {
                 ContainedPtySpawnErrorStage::Adoption,
                 anyhow::anyhow!("injected adoption failure"),
                 child,
+                recovery,
             ));
         }
 
@@ -416,6 +425,7 @@ impl PtyFd {
                 ContainedPtySpawnErrorStage::Adoption,
                 adoption.error.into(),
                 adoption.child,
+                recovery,
             )),
         }
     }
@@ -555,13 +565,17 @@ impl Write for UnixMasterWriter {
 #[cfg(test)]
 mod contained_spawn_failure_tests {
     use super::*;
+    use crate::FailedChildRecoveryFault;
 
-    fn assert_injected_failure(fault: ContainedSpawnFault, stage: ContainedPtySpawnErrorStage) {
+    fn injected_failure(
+        fault: ContainedSpawnFault,
+        stage: ContainedPtySpawnErrorStage,
+    ) -> ContainedPtySpawnError {
         let (_master, slave) = openpty(PtySize::default()).unwrap();
         let mut command = CommandBuilder::new("/usr/bin/perl");
         command.args(["-e", "sleep 60"]);
 
-        let mut error = match slave.fd.spawn_contained_command_with_fault(command, fault) {
+        let error = match slave.fd.spawn_contained_command_with_fault(command, fault) {
             Ok(_) => panic!("injected failure returned a guard"),
             Err(error) => error,
         };
@@ -571,6 +585,32 @@ mod contained_spawn_failure_tests {
             error.recovery_pending(),
             "injected live child was not retained by the error state"
         );
+        error
+    }
+
+    fn wait_for_recovery_owner(pending: &std::sync::atomic::AtomicBool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while pending.load(std::sync::atomic::Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "detached exact-child recovery owner did not reap"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn receipt_failure_retains_child_across_kill_error() {
+        let mut error = injected_failure(
+            ContainedSpawnFault::Receipt,
+            ContainedPtySpawnErrorStage::Receipt,
+        );
+        let injected = error.recovery.as_ref().unwrap().attempt_with_fault(
+            std::time::Duration::from_millis(10),
+            FailedChildRecoveryFault::KillError,
+        );
+        assert!(injected.is_err());
+        assert!(error.recovery_pending());
         assert!(
             error.recover(std::time::Duration::from_secs(2)).unwrap(),
             "exact-child recovery did not reach reap"
@@ -579,18 +619,30 @@ mod contained_spawn_failure_tests {
     }
 
     #[test]
-    fn receipt_failure_retains_and_resolves_exact_child() {
-        assert_injected_failure(
-            ContainedSpawnFault::Receipt,
-            ContainedPtySpawnErrorStage::Receipt,
-        );
-    }
-
-    #[test]
-    fn adoption_failure_retains_and_resolves_exact_child() {
-        assert_injected_failure(
+    fn adoption_failure_deadline_transfers_to_bounded_drop_owner() {
+        let error = injected_failure(
             ContainedSpawnFault::Adoption,
             ContainedPtySpawnErrorStage::Adoption,
         );
+        let completed = error
+            .recovery
+            .as_ref()
+            .unwrap()
+            .attempt_with_fault(
+                std::time::Duration::from_millis(10),
+                FailedChildRecoveryFault::Deadline,
+            )
+            .unwrap();
+        assert!(!completed);
+        assert!(error.recovery_pending());
+
+        let pending = std::sync::Arc::clone(&error.recovery.as_ref().unwrap().pending);
+        let started = std::time::Instant::now();
+        drop(error);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "pending-error destructor blocked"
+        );
+        wait_for_recovery_owner(&pending);
     }
 }

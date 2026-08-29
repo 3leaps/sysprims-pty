@@ -14,8 +14,8 @@ The compatibility delta is intentionally narrow:
 - a Unix implementation whose prepared sysprims acquisition hook replaces
   portable-pty's internal `setsid` slot;
 - an exact-child adapter owned by `sysprims_timeout::ContainmentGuard`;
-- opaque exact-child recovery ownership for failures after spawn but before
-  guard return;
+- a pre-spawn parent recovery owner that retains the opaque exact child for
+  bounded failure attempts and nonblocking error destruction;
 - pre-spawn rejection for unsupported implementations, including Windows;
 - lifecycle, real-PTY, allocator-lock, and compatibility tests; and
 - mechanical current-Clippy fixes that do not change behavior.
