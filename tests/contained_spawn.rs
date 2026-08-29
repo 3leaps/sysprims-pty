@@ -4,7 +4,9 @@ mod unix {
     use std::io::Read;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
-    use sysprims_timeout::{TerminateTreeConfig, TreeKillReliability};
+    use sysprims_timeout::{
+        ContainmentChild, ContainmentCompletionEvidence, TerminateTreeConfig, TreeKillReliability,
+    };
 
     static PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -83,39 +85,73 @@ mod unix {
     }
 
     #[test]
-    fn explicit_termination_escalates_for_stubborn_child() {
+    #[ignore = "run with make test-owned-pty-empty against the reviewed sysprims candidate"]
+    fn owned_empty_explicit_close_with_descendant() {
         let _serial = serialize_process_test();
         let pair = native_pty_system().openpty(PtySize::default()).unwrap();
         let mut reader = pair.master.try_clone_reader().unwrap();
-        let mut command = CommandBuilder::new("/usr/bin/perl");
-        command.args([
-            "-e",
-            "$SIG{TERM} = 'IGNORE'; $| = 1; print \"READY\\n\"; sleep 60",
-        ]);
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args(["-c", "sleep 60 & printf 'READY\\n'; wait"]);
 
         let mut guard = pair.slave.spawn_contained_command(command).unwrap();
         let mut ready = [0_u8; 64];
         let count = reader.read(&mut ready).unwrap();
         assert!(String::from_utf8_lossy(&ready[..count]).contains("READY"));
+        assert_eq!(
+            guard.tree_kill_reliability(),
+            TreeKillReliability::Guaranteed
+        );
         let outcome = guard.terminate(quick_termination()).unwrap();
 
         assert!(outcome.exited);
-        assert!(outcome.escalated);
-        assert!(guard.into_child().is_ok());
+        assert_eq!(
+            outcome.tree_kill_reliability,
+            TreeKillReliability::Guaranteed
+        );
+        assert!(matches!(
+            outcome.completion,
+            ContainmentCompletionEvidence::Empty { .. }
+        ));
+        let mut child = match guard.into_child() {
+            Ok(child) => child,
+            Err(_) => panic!("finalized guard did not return the exact child"),
+        };
+        assert!(ContainmentChild::try_wait(&mut child).unwrap());
     }
 
     #[test]
-    fn natural_leader_exit_cleans_remaining_descendant() {
+    #[ignore = "run with make test-owned-pty-empty against the reviewed sysprims candidate"]
+    fn owned_empty_natural_leader_exit_with_descendant() {
         let _serial = serialize_process_test();
         let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+        let mut reader = pair.master.try_clone_reader().unwrap();
         let mut command = CommandBuilder::new("/bin/sh");
-        command.args(["-c", "sleep 60 & sleep 60 & exit 0"]);
+        command.args(["-c", "sleep 60 & sleep 60 & printf 'READY\\n'; exit 0"]);
 
         let mut guard = pair.slave.spawn_contained_command(command).unwrap();
+        let mut ready = [0_u8; 64];
+        let count = reader.read(&mut ready).unwrap();
+        assert!(String::from_utf8_lossy(&ready[..count]).contains("READY"));
+        assert_eq!(
+            guard.tree_kill_reliability(),
+            TreeKillReliability::Guaranteed
+        );
         let outcome = wait_for_completion(&mut guard);
 
         assert!(outcome.exited);
-        assert!(guard.into_child().is_ok());
+        assert_eq!(
+            outcome.tree_kill_reliability,
+            TreeKillReliability::Guaranteed
+        );
+        assert!(matches!(
+            outcome.completion,
+            ContainmentCompletionEvidence::Empty { .. }
+        ));
+        let mut child = match guard.into_child() {
+            Ok(child) => child,
+            Err(_) => panic!("finalized guard did not return the exact child"),
+        };
+        assert!(ContainmentChild::try_wait(&mut child).unwrap());
     }
 
     #[test]

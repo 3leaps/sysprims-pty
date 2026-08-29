@@ -3,14 +3,14 @@ set -eu
 
 companion_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 sysprims_root=${SYSPRIMS_ROOT:-"$companion_root/../sysprims"}
+reviewed_sysprims_rev=1f06856e38529ef69f1121ab3725414e26d6f087
 
 if ! docker info >/dev/null 2>&1; then
     echo "docker daemon unavailable; start the reviewed disposable runtime" >&2
     exit 2
 fi
 
-test "$(git -C "$sysprims_root" rev-parse HEAD)" = \
-    "3cb76fa109879a56e20c1dd4662ab2510a26afeb"
+test "$(git -C "$sysprims_root" rev-parse HEAD)" = "$reviewed_sysprims_rev"
 test -z "$(git -C "$sysprims_root" status --short)"
 
 docker run --rm \
