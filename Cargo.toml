@@ -11,9 +11,13 @@
 
 [package]
 edition = "2018"
+rust-version = "1.88.0"
 name = "sysprims-pty"
 version = "0.9.0"
-authors = ["Wez Furlong"]
+authors = [
+    "Wez Furlong",
+    "3 Leaps, LLC",
+]
 build = false
 autolib = false
 autobins = false

@@ -1,5 +1,8 @@
 # sysprims-pty
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE-MIT)
+[![Rust: 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org/)
+
 Cross-platform **owned PTY sessions** with race-free process containment,
 built on [sysprims](https://github.com/3leaps/sysprims).
 
@@ -96,4 +99,14 @@ fixture invokes `/bin/sh` only to create deterministic descendant processes.
 ## Provenance
 
 This tree is derived from the `pty` crate in the wezterm repository. See
-[UPSTREAM.md](UPSTREAM.md) and [LICENSE.md](LICENSE.md).
+[UPSTREAM.md](UPSTREAM.md) and [LICENSE-MIT](LICENSE-MIT).
+
+## License
+
+MIT. See [LICENSE-MIT](LICENSE-MIT).
+
+Upstream `portable-pty` is MIT (Copyright 2018 Wez Furlong). 3 Leaps
+modifications are MIT as well. This crate is **not** dual-licensed
+MIT/Apache-2.0 like `sysprims`; the upstream grant is MIT-only.
+
+This project follows the [3 Leaps OSS policies](https://github.com/3leaps/oss-policies).

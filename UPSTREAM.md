@@ -6,7 +6,7 @@ This source tree is derived from the `portable-pty` 0.9.0 crate.
 - Upstream workspace path: `pty`
 - Upstream source revision:
   `f8921727a11b9f8b073e8c24821d72fd41283500`
-- Upstream license: MIT; see `LICENSE.md`
+- Upstream license: MIT; see `LICENSE-MIT`
 
 The compatibility delta is intentionally narrow:
 
