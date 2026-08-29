@@ -570,8 +570,8 @@ mod contained_spawn_failure_tests {
     fn injected_failure(
         fault: ContainedSpawnFault,
         stage: ContainedPtySpawnErrorStage,
-    ) -> ContainedPtySpawnError {
-        let (_master, slave) = openpty(PtySize::default()).unwrap();
+    ) -> (ContainedPtySpawnError, UnixMasterPty) {
+        let (master, slave) = openpty(PtySize::default()).unwrap();
         let mut command = CommandBuilder::new("/usr/bin/perl");
         command.args(["-e", "sleep 60"]);
 
@@ -585,7 +585,7 @@ mod contained_spawn_failure_tests {
             error.recovery_pending(),
             "injected live child was not retained by the error state"
         );
-        error
+        (error, master)
     }
 
     fn wait_for_recovery_owner(pending: &std::sync::atomic::AtomicBool) {
@@ -601,7 +601,7 @@ mod contained_spawn_failure_tests {
 
     #[test]
     fn receipt_failure_retains_child_across_kill_error() {
-        let mut error = injected_failure(
+        let (mut error, _master) = injected_failure(
             ContainedSpawnFault::Receipt,
             ContainedPtySpawnErrorStage::Receipt,
         );
@@ -620,7 +620,7 @@ mod contained_spawn_failure_tests {
 
     #[test]
     fn adoption_failure_deadline_transfers_to_bounded_drop_owner() {
-        let error = injected_failure(
+        let (error, _master) = injected_failure(
             ContainedSpawnFault::Adoption,
             ContainedPtySpawnErrorStage::Adoption,
         );
