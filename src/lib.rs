@@ -51,12 +51,20 @@ use std::os::windows::prelude::{AsRawHandle, RawHandle};
 /// While containment is active, the guard keeps the child handle private.
 #[derive(Debug)]
 pub struct ContainedPtyChild {
+    #[cfg(unix)]
     pub(crate) child: std::process::Child,
+    #[cfg(windows)]
+    pub(crate) child: win::WinChild,
 }
 
 impl ContainedPtyChild {
     #[cfg(unix)]
     pub(crate) fn new(child: std::process::Child) -> Self {
+        Self { child }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn new(child: win::WinChild) -> Self {
         Self { child }
     }
 }
@@ -66,13 +74,14 @@ impl ContainedPtyChild {
 pub enum ContainedPtySpawnErrorStage {
     /// No child was created.
     BeforeSpawn,
-    /// The same-spawn receipt could not be validated.
+    /// Spawn-time group/Job assignment evidence could not be sealed.
     Receipt,
     /// The exact child and receipt could not be adopted into a guard.
     Adoption,
+    /// The assigned child could not be resumed and was resolved through its Job.
+    Resume,
 }
 
-#[cfg(unix)]
 enum FailedChildRecoveryCommand {
     Adopt(ContainedPtyChild),
     Attempt {
@@ -83,21 +92,21 @@ enum FailedChildRecoveryCommand {
     },
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[derive(Clone, Copy)]
 enum FailedChildRecoveryFault {
     None,
+    #[cfg(unix)]
     KillError,
+    #[cfg(unix)]
     Deadline,
 }
 
-#[cfg(unix)]
 struct FailedChildRecovery {
     sender: std::sync::mpsc::Sender<FailedChildRecoveryCommand>,
     pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-#[cfg(unix)]
 impl FailedChildRecovery {
     fn prepare() -> IoResult<Self> {
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -163,7 +172,7 @@ impl FailedChildRecovery {
             })?
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn attempt_with_fault(
         &self,
         timeout: std::time::Duration,
@@ -177,7 +186,6 @@ impl FailedChildRecovery {
     }
 }
 
-#[cfg(unix)]
 fn failed_child_recovery_worker(
     receiver: std::sync::mpsc::Receiver<FailedChildRecoveryCommand>,
     pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -223,7 +231,6 @@ fn failed_child_recovery_worker(
     }
 }
 
-#[cfg(unix)]
 fn attempt_failed_child_recovery(
     child: &mut Option<ContainedPtyChild>,
     timeout: std::time::Duration,
@@ -234,19 +241,21 @@ fn attempt_failed_child_recovery(
         None => return Ok(true),
     };
 
-    if owned_child.child.try_wait()?.is_some() {
+    if Child::try_wait(owned_child)?.is_some() {
         child.take();
         return Ok(true);
     }
 
     #[cfg(test)]
     match fault {
+        #[cfg(unix)]
         FailedChildRecoveryFault::KillError => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "injected exact-child kill failure",
             ));
         }
+        #[cfg(unix)]
         FailedChildRecoveryFault::Deadline => {
             std::thread::sleep(timeout.min(std::time::Duration::from_millis(10)));
             return Ok(false);
@@ -254,14 +263,14 @@ fn attempt_failed_child_recovery(
         FailedChildRecoveryFault::None => {}
     }
 
-    // This is the exact spawn-owned std::process::Child handle. Never
+    // This is the exact spawn-owned child handle. Never
     // reconstruct signal authority from an observed PID.
-    owned_child.child.kill()?;
+    ChildKiller::kill(owned_child)?;
 
     let timeout = timeout.min(std::time::Duration::from_secs(2));
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        match owned_child.child.try_wait()? {
+        match Child::try_wait(owned_child)? {
             Some(_) => {
                 child.take();
                 return Ok(true);
@@ -274,12 +283,11 @@ fn attempt_failed_child_recovery(
     }
 }
 
-#[cfg(unix)]
 fn bounded_local_recovery_or_abort(mut child: ContainedPtyChild) -> ! {
-    let _ = child.child.kill();
+    let _ = ChildKiller::kill(&mut child);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
-        match child.child.try_wait() {
+        match Child::try_wait(&mut child) {
             Ok(Some(_)) => {
                 std::process::abort();
             }
@@ -300,7 +308,6 @@ fn bounded_local_recovery_or_abort(mut child: ContainedPtyChild) -> ! {
 pub struct ContainedPtySpawnError {
     stage: ContainedPtySpawnErrorStage,
     source: Error,
-    #[cfg(unix)]
     recovery: Option<FailedChildRecovery>,
 }
 
@@ -309,12 +316,10 @@ impl ContainedPtySpawnError {
         Self {
             stage: ContainedPtySpawnErrorStage::BeforeSpawn,
             source,
-            #[cfg(unix)]
             recovery: None,
         }
     }
 
-    #[cfg(unix)]
     pub(crate) fn after_spawn(
         stage: ContainedPtySpawnErrorStage,
         source: Error,
@@ -355,17 +360,9 @@ impl ContainedPtySpawnError {
 
     /// Whether exact-child recovery is still in progress.
     pub fn recovery_pending(&self) -> bool {
-        #[cfg(unix)]
-        {
-            self.recovery
-                .as_ref()
-                .is_some_and(FailedChildRecovery::is_pending)
-        }
-
-        #[cfg(not(unix))]
-        {
-            false
-        }
+        self.recovery
+            .as_ref()
+            .is_some_and(FailedChildRecovery::is_pending)
     }
 
     /// Make one bounded exact-child recovery attempt.
@@ -373,18 +370,9 @@ impl ContainedPtySpawnError {
     /// The attempt is capped at two seconds. Returns `true` when no child
     /// remains to reap.
     pub fn recover(&mut self, timeout: std::time::Duration) -> IoResult<bool> {
-        #[cfg(unix)]
-        {
-            match self.recovery.as_mut() {
-                Some(recovery) => recovery.attempt(timeout),
-                None => Ok(true),
-            }
-        }
-
-        #[cfg(not(unix))]
-        {
-            let _ = timeout;
-            Ok(true)
+        match self.recovery.as_mut() {
+            Some(recovery) => recovery.attempt(timeout),
+            None => Ok(true),
         }
     }
 }
@@ -534,8 +522,9 @@ pub trait SlavePty {
 
     /// Spawns a command with a sealed same-spawn sysprims containment guard.
     ///
-    /// Native Unix PTYs provide guaranteed spawn-time acquisition. Other PTY
-    /// implementations reject this operation before spawning a process.
+    /// Native Unix PTYs use a sealed session receipt. Native Windows ConPTY
+    /// creates the child suspended and seals exact-process Job membership
+    /// before one resume. Other PTY implementations reject before spawning.
     fn spawn_contained_command(
         &self,
         cmd: CommandBuilder,
@@ -671,39 +660,47 @@ impl Child for std::process::Child {
 
 impl Child for ContainedPtyChild {
     fn try_wait(&mut self) -> IoResult<Option<ExitStatus>> {
-        std::process::Child::try_wait(&mut self.child).map(|status| status.map(Into::into))
+        #[cfg(unix)]
+        return std::process::Child::try_wait(&mut self.child).map(|status| status.map(Into::into));
+
+        #[cfg(windows)]
+        return Child::try_wait(&mut self.child);
     }
 
     fn wait(&mut self) -> IoResult<ExitStatus> {
-        std::process::Child::wait(&mut self.child).map(Into::into)
+        #[cfg(unix)]
+        return std::process::Child::wait(&mut self.child).map(Into::into);
+
+        #[cfg(windows)]
+        return Child::wait(&mut self.child);
     }
 
     fn process_id(&self) -> Option<u32> {
-        Some(self.child.id())
+        #[cfg(unix)]
+        return Some(self.child.id());
+
+        #[cfg(windows)]
+        return Child::process_id(&self.child);
     }
 
     #[cfg(windows)]
     fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
-        Some(std::os::windows::io::AsRawHandle::as_raw_handle(
-            &self.child,
-        ))
+        Child::as_raw_handle(&self.child)
     }
 }
 
 impl sysprims_timeout::ContainmentChild for ContainedPtyChild {
     fn process_id(&self) -> Option<u32> {
-        Some(self.child.id())
+        Child::process_id(self)
     }
 
     fn try_wait(&mut self) -> IoResult<bool> {
-        std::process::Child::try_wait(&mut self.child).map(|status| status.is_some())
+        Child::try_wait(self).map(|status| status.is_some())
     }
 
     #[cfg(windows)]
     fn raw_process_handle(&self) -> Option<std::os::windows::io::RawHandle> {
-        Some(std::os::windows::io::AsRawHandle::as_raw_handle(
-            &self.child,
-        ))
+        Child::as_raw_handle(self)
     }
 }
 

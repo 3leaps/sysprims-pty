@@ -208,25 +208,51 @@ mod unix {
 
 #[cfg(windows)]
 #[test]
-fn guaranteed_containment_rejects_before_spawn() {
+fn guaranteed_conpty_containment_owns_job_and_child() {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use sysprims_timeout::{ContainmentBoundaryStrength, TerminateTreeConfig, TreeKillReliability};
 
     let marker = std::env::temp_dir().join(format!(
-        "portable-pty-contained-spawn-{}",
-        std::process::id()
+        "portable-pty-contained-spawn-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos()
     ));
     let mut command = CommandBuilder::new("cmd.exe");
-    command.args(["/C", &format!("echo spawned>\"{}\"", marker.display())]);
+    command.args([
+        "/C",
+        &format!(
+            "echo spawned>\"{}\" & ping -n 30 127.0.0.1 >NUL",
+            marker.display()
+        ),
+    ]);
     let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+    let mut guard = pair.slave.spawn_contained_command(command).unwrap();
 
-    let error = match pair.slave.spawn_contained_command(command) {
-        Ok(_) => panic!("Windows guaranteed containment must reject"),
-        Err(error) => error,
-    };
-
-    assert!(error.to_string().contains("unavailable"));
-    assert!(
-        !marker.exists(),
-        "unsupported contained spawn executed the command"
+    assert_eq!(
+        guard.tree_kill_reliability(),
+        TreeKillReliability::Guaranteed
     );
+    assert_eq!(
+        guard.boundary_strength(),
+        ContainmentBoundaryStrength::KernelEnforcedJob
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !marker.exists() {
+        assert!(Instant::now() < deadline, "contained child did not run");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let outcome = guard
+        .terminate(TerminateTreeConfig::default())
+        .expect("contained ConPTY termination failed");
+    assert!(outcome.exited);
+    assert_eq!(
+        outcome.boundary_strength,
+        ContainmentBoundaryStrength::KernelEnforcedJob
+    );
+    let _ = std::fs::remove_file(marker);
 }

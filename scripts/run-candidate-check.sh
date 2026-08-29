@@ -5,14 +5,6 @@ companion_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 sysprims_root=${SYSPRIMS_ROOT:-"$companion_root/../sysprims"}
 reviewed_sysprims_rev=419835f84466cb2e0b1ef9a9ed0592dcb3c4c4c8
 
-case "$(uname -s)" in
-    Darwin|Linux) ;;
-    *)
-        echo "owned PTY Empty proof requires macOS or Linux" >&2
-        exit 2
-        ;;
-esac
-
 actual_sysprims_rev=$(git -C "$sysprims_root" rev-parse HEAD)
 if [ "$actual_sysprims_rev" != "$reviewed_sysprims_rev" ]; then
     echo "sysprims must be at reviewed revision $reviewed_sysprims_rev" >&2
@@ -24,7 +16,7 @@ if [ -n "$(git -C "$sysprims_root" status --short)" ]; then
     exit 2
 fi
 
-work_root=$(mktemp -d "${TMPDIR:-/tmp}/sysprims-pty-owned-empty.XXXXXX")
+work_root=$(mktemp -d "${TMPDIR:-/tmp}/sysprims-pty-candidate.XXXXXX")
 trap 'rm -rf "$work_root"' EXIT HUP INT TERM
 
 mkdir -p "$work_root/companion"
@@ -63,11 +55,15 @@ mv "$work_root/Cargo.toml" "$work_root/companion/Cargo.toml"
 
 echo "sysprims candidate: $reviewed_sysprims_rev"
 cd "$work_root/companion"
-CARGO_TARGET_DIR="$companion_root/target/owned-pty-empty" \
-    cargo test --test contained_spawn \
-    'unix::owned_empty_explicit_close_with_descendant' -- \
-    --exact --ignored --nocapture
-CARGO_TARGET_DIR="$companion_root/target/owned-pty-empty" \
-    cargo test --test contained_spawn \
-    'unix::owned_empty_natural_leader_exit_with_descendant' -- \
-    --exact --ignored --nocapture
+CARGO_TARGET_DIR="$companion_root/target/candidate-check" \
+    cargo fmt --all -- --check
+CARGO_TARGET_DIR="$companion_root/target/candidate-check" \
+    cargo clippy --all-targets --all-features -- -D warnings
+CARGO_TARGET_DIR="$companion_root/target/candidate-check" \
+    cargo test --all-targets --all-features
+CARGO_TARGET_DIR="$companion_root/target/candidate-check-windows-x64" \
+    RUSTFLAGS=-Dwarnings \
+    cargo check --all-targets --all-features --target x86_64-pc-windows-msvc
+CARGO_TARGET_DIR="$companion_root/target/candidate-check-windows-arm64" \
+    RUSTFLAGS=-Dwarnings \
+    cargo check --all-targets --all-features --target aarch64-pc-windows-msvc

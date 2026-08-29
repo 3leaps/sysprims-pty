@@ -15,13 +15,15 @@ The compatibility delta is intentionally narrow:
 - an object-safe guarded-spawn method on `SlavePty`;
 - a Unix implementation whose prepared sysprims acquisition hook replaces
   portable-pty's internal `setsid` slot;
+- a Windows ConPTY transaction that creates one child suspended, assigns and
+  verifies that exact process in a non-breakaway Job, then resumes once;
 - an exact-child adapter owned by `sysprims_timeout::ContainmentGuard`;
 - a pre-spawn parent recovery owner that retains the opaque exact child for
   bounded failure attempts and nonblocking error destruction;
-- pre-spawn rejection for unsupported implementations, including Windows;
+- pre-spawn rejection for unsupported PTY implementations;
 - lifecycle, real-PTY, allocator-lock, and compatibility tests; and
 - mechanical current-Clippy fixes that do not change behavior.
 
 The minimum sysprims contract is `v0.2.2`, commit
-`1e56e8b7fbe004a0a1b028b81ba11193e1dd71ff`. Compatibility is also checked
+`419835f84466cb2e0b1ef9a9ed0592dcb3c4c4c8`. Compatibility is also checked
 against that exact sysprims revision before a companion release is cut.
