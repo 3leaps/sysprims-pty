@@ -307,10 +307,29 @@ fn assert_process_exited(handle: &std::os::windows::io::OwnedHandle) {
 }
 
 #[cfg(windows)]
-fn drain_windows_pty_output(master: &dyn portable_pty::MasterPty) {
+fn serve_headless_windows_pty(master: &dyn portable_pty::MasterPty) {
     let mut reader = master.try_clone_reader().unwrap();
+    let mut writer = master.take_writer().unwrap();
     std::thread::spawn(move || {
-        let _ = std::io::copy(&mut reader, &mut std::io::sink());
+        let mut output = Vec::new();
+        let mut chunk = [0; 1_024];
+        loop {
+            let Ok(read) = reader.read(&mut chunk) else {
+                return;
+            };
+            if read == 0 {
+                return;
+            }
+            output.extend_from_slice(&chunk[..read]);
+            if output.windows(4).any(|window| window == b"\x1b[6n") {
+                use std::io::Write as _;
+                writer.write_all(b"\x1b[1;1R").unwrap();
+                writer.flush().unwrap();
+                output.clear();
+            } else if output.len() > 3 {
+                output.drain(..output.len() - 3);
+            }
+        }
     });
 }
 
@@ -329,7 +348,7 @@ fn immediate_child_and_grandchild_remain_in_owned_job() {
     command.env("SYSPRIMS_PTY_GRANDCHILD_PID_FILE", &grandchild_pid_file);
 
     let pair = native_pty_system().openpty(PtySize::default()).unwrap();
-    drain_windows_pty_output(pair.master.as_ref());
+    serve_headless_windows_pty(pair.master.as_ref());
     let mut guard = pair.slave.spawn_contained_command(command).unwrap();
     let child_handle = open_process_for_wait(wait_for_pid_file(&child_pid_file));
     let grandchild_handle = open_process_for_wait(wait_for_pid_file(&grandchild_pid_file));
@@ -363,7 +382,7 @@ fn create_breakaway_from_job_cannot_escape() {
     command.env("SYSPRIMS_PTY_BREAKAWAY_RESULT_FILE", &result_file);
 
     let pair = native_pty_system().openpty(PtySize::default()).unwrap();
-    drain_windows_pty_output(pair.master.as_ref());
+    serve_headless_windows_pty(pair.master.as_ref());
     let mut guard = pair.slave.spawn_contained_command(command).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let result = loop {

@@ -232,12 +232,33 @@ mod tests {
         ))
     }
 
-    fn drain_output(master: &ConPtyMasterPty) {
+    fn serve_headless_conpty(master: &ConPtyMasterPty) {
         let mut reader = master
             .try_clone_reader()
             .expect("ConPTY output reader clone failed");
+        let mut writer = master.take_writer().expect("ConPTY input writer missing");
         std::thread::spawn(move || {
-            let _ = std::io::copy(&mut reader, &mut std::io::sink());
+            let mut output = Vec::new();
+            let mut chunk = [0; 1_024];
+            loop {
+                let Ok(read) = reader.read(&mut chunk) else {
+                    return;
+                };
+                if read == 0 {
+                    return;
+                }
+                output.extend_from_slice(&chunk[..read]);
+                if output.windows(4).any(|window| window == b"\x1b[6n") {
+                    use std::io::Write as _;
+                    writer
+                        .write_all(b"\x1b[1;1R")
+                        .expect("ConPTY cursor-position response failed");
+                    writer.flush().expect("ConPTY input flush failed");
+                    output.clear();
+                } else if output.len() > 3 {
+                    output.drain(..output.len() - 3);
+                }
+            }
         });
     }
 
@@ -246,7 +267,7 @@ mod tests {
         let marker = marker_path("resume-sentinel");
         let _ = std::fs::remove_file(&marker);
         let (master, slave) = open_conpty(PtySize::default()).expect("ConPTY open failed");
-        drain_output(&master);
+        serve_headless_conpty(&master);
         let mut command =
             CommandBuilder::new(std::env::current_exe().expect("current test executable missing"));
         command.args([
@@ -303,7 +324,7 @@ mod tests {
         let marker = marker_path("failed-resume");
         let _ = std::fs::remove_file(&marker);
         let (master, slave) = open_conpty(PtySize::default()).expect("ConPTY open failed");
-        drain_output(&master);
+        serve_headless_conpty(&master);
         let mut command =
             CommandBuilder::new(std::env::current_exe().expect("current test executable missing"));
         command.args([
