@@ -230,6 +230,7 @@ fn guaranteed_conpty_containment_owns_job_and_child() {
         ),
     ]);
     let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+    serve_headless_windows_pty(pair.master.as_ref());
     let mut guard = pair.slave.spawn_contained_command(command).unwrap();
 
     assert_eq!(
