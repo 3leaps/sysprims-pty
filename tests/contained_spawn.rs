@@ -221,14 +221,10 @@ fn guaranteed_conpty_containment_owns_job_and_child() {
             .expect("system clock before Unix epoch")
             .as_nanos()
     ));
-    let mut command = CommandBuilder::new("cmd.exe");
-    command.args([
-        "/C",
-        &format!(
-            "echo spawned>\"{}\" & ping -n 30 127.0.0.1 >NUL",
-            marker.display()
-        ),
-    ]);
+    let mut command = CommandBuilder::new(std::env::current_exe().unwrap());
+    command.args(["--exact", "windows_contained_spawn_helper", "--nocapture"]);
+    command.env("SYSPRIMS_PTY_TEST_MODE", "contained_spawn");
+    command.env("SYSPRIMS_PTY_CONTAINED_MARKER", &marker);
     let pair = native_pty_system().openpty(PtySize::default()).unwrap();
     serve_headless_windows_pty(pair.master.as_ref());
     let mut guard = pair.slave.spawn_contained_command(command).unwrap();
@@ -256,6 +252,22 @@ fn guaranteed_conpty_containment_owns_job_and_child() {
         ContainmentBoundaryStrength::KernelEnforcedJob
     );
     let _ = std::fs::remove_file(marker);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_contained_spawn_helper() {
+    use std::time::Duration;
+
+    if std::env::var("SYSPRIMS_PTY_TEST_MODE").as_deref() != Ok("contained_spawn") {
+        return;
+    }
+    std::fs::write(
+        std::env::var_os("SYSPRIMS_PTY_CONTAINED_MARKER").unwrap(),
+        b"started",
+    )
+    .expect("failed to write contained-spawn marker");
+    std::thread::sleep(Duration::from_secs(30));
 }
 
 #[cfg(windows)]
