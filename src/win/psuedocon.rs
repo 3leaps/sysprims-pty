@@ -1,4 +1,4 @@
-use super::WinChild;
+use super::{SuspendedThread, WinChild};
 use crate::cmdbuilder::CommandBuilder;
 use crate::win::procthreadattr::ProcThreadAttributeList;
 use anyhow::{bail, ensure, Error};
@@ -17,7 +17,8 @@ use winapi::shared::winerror::{HRESULT, S_OK};
 use winapi::um::handleapi::*;
 use winapi::um::processthreadsapi::*;
 use winapi::um::winbase::{
-    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 use winapi::um::wincon::COORD;
 use winapi::um::winnt::HANDLE;
@@ -172,5 +173,67 @@ impl PsuedoCon {
         Ok(WinChild {
             proc: Mutex::new(proc),
         })
+    }
+
+    pub fn spawn_suspended_command(
+        &self,
+        cmd: CommandBuilder,
+    ) -> anyhow::Result<(WinChild, SuspendedThread)> {
+        let mut si: STARTUPINFOEXW = unsafe { mem::zeroed() };
+        si.StartupInfo.cb = mem::size_of::<STARTUPINFOEXW>() as u32;
+        // ConPTY transports stdio through the pseudoconsole attribute. No
+        // process handles or parent-side pipe handles are inheritable.
+        si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        si.StartupInfo.hStdInput = INVALID_HANDLE_VALUE;
+        si.StartupInfo.hStdOutput = INVALID_HANDLE_VALUE;
+        si.StartupInfo.hStdError = INVALID_HANDLE_VALUE;
+
+        let mut attrs = ProcThreadAttributeList::with_capacity(1)?;
+        attrs.set_pty(self.con)?;
+        si.lpAttributeList = attrs.as_mut_ptr();
+
+        let mut pi: PROCESS_INFORMATION = unsafe { mem::zeroed() };
+        let (mut exe, mut cmdline) = cmd.cmdline()?;
+        let cmd_os = OsString::from_wide(&cmdline);
+        let cwd = cmd.current_directory();
+        let mut environment = cmd.environment_block();
+
+        let res = unsafe {
+            CreateProcessW(
+                exe.as_mut_slice().as_mut_ptr(),
+                cmdline.as_mut_slice().as_mut_ptr(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
+                environment.as_mut_slice().as_mut_ptr() as *mut _,
+                cwd.as_ref()
+                    .map(|c| c.as_slice().as_ptr())
+                    .unwrap_or(ptr::null()),
+                &mut si.StartupInfo,
+                &mut pi,
+            )
+        };
+        if res == 0 {
+            let err = IoError::last_os_error();
+            let msg = format!(
+                "suspended CreateProcessW `{:?}` in cwd `{:?}` failed: {}",
+                cmd_os,
+                cwd.as_ref().map(|c| OsString::from_wide(c)),
+                err
+            );
+            log::error!("{}", msg);
+            bail!("{}", msg);
+        }
+
+        // SAFETY: successful CreateProcessW returned fresh owned handles.
+        let thread = unsafe { OwnedHandle::from_raw_handle(pi.hThread as _) };
+        let proc = unsafe { OwnedHandle::from_raw_handle(pi.hProcess as _) };
+        Ok((
+            WinChild {
+                proc: Mutex::new(proc),
+            },
+            SuspendedThread::new(thread),
+        ))
     }
 }

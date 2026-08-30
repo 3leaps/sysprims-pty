@@ -3,7 +3,7 @@ set -eu
 
 companion_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 sysprims_root=${SYSPRIMS_ROOT:-"$companion_root/../sysprims"}
-reviewed_sysprims_rev=1e56e8b7fbe004a0a1b028b81ba11193e1dd71ff
+reviewed_sysprims_rev=7e5cc03847029dbd316d9f8c0887997bf64a247c
 
 if ! docker info >/dev/null 2>&1; then
     echo "docker daemon unavailable; start the reviewed disposable runtime" >&2

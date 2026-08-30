@@ -66,3 +66,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88.0
       - run: cargo test --all-targets --all-features
+      - name: Windows containment runtime evidence
+        if: runner.os == 'Windows'
+        run: cargo test --test contained_spawn -- --nocapture

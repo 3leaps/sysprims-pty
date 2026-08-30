@@ -38,9 +38,13 @@ task runner that:
 5. reads containment, completion, and reap evidence with no process-group,
    Job, or wait glue of your own.
 
-On Unix today, `SlavePty::spawn_contained_command` installs the prepared
-sysprims acquisition hook in the PTY-owned spawn, validates its sealed
-same-spawn receipt, and returns an owned `ContainmentGuard<ContainedPtyChild>`.
+On Unix, `SlavePty::spawn_contained_command` installs the prepared sysprims
+acquisition hook in the PTY-owned spawn and validates its sealed same-spawn
+receipt. On Windows, the ConPTY adapter creates the child suspended exactly
+once, assigns and verifies that exact process in a prepared non-breakaway Job,
+transfers sole process/Job authority to the guard, and resumes the primary
+thread exactly once. Both paths return an owned
+`ContainmentGuard<ContainedPtyChild>`.
 
 ## What this is not
 
@@ -62,10 +66,11 @@ Generic process identity, Job/group evidence, and receipts live in
   lifecycle transition.
 - Completion evidence is reported independently as `Empty`, `Survivors`,
   or `Unknown`.
+- Boundary strength is independent too: Unix reports `cooperative_group`; the
+  pre-execution Windows Job path reports `kernel_enforced_job`.
 - A cooperative Unix descendant can still leave its acquired group.
   Guaranteed acquisition is not an OS-enforced non-escape guarantee.
-- Unsupported implementations, including Windows in this tree, reject the
-  guarded API before spawning.
+- Unsupported PTY implementations reject the guarded API before spawning.
 
 ## Owned real-PTY examples
 

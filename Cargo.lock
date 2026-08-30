@@ -705,7 +705,7 @@ dependencies = [
 [[package]]
 name = "sysprims-core"
 version = "0.2.2"
-source = "git+https://github.com/3leaps/sysprims?rev=1e56e8b7fbe004a0a1b028b81ba11193e1dd71ff#1e56e8b7fbe004a0a1b028b81ba11193e1dd71ff"
+source = "git+https://github.com/3leaps/sysprims?rev=7e5cc03847029dbd316d9f8c0887997bf64a247c#7e5cc03847029dbd316d9f8c0887997bf64a247c"
 dependencies = [
  "rsfulmen",
  "thiserror",
@@ -715,7 +715,7 @@ dependencies = [
 [[package]]
 name = "sysprims-proc"
 version = "0.2.2"
-source = "git+https://github.com/3leaps/sysprims?rev=1e56e8b7fbe004a0a1b028b81ba11193e1dd71ff#1e56e8b7fbe004a0a1b028b81ba11193e1dd71ff"
+source = "git+https://github.com/3leaps/sysprims?rev=7e5cc03847029dbd316d9f8c0887997bf64a247c#7e5cc03847029dbd316d9f8c0887997bf64a247c"
 dependencies = [
  "libc",
  "serde",
@@ -753,7 +753,7 @@ dependencies = [
 [[package]]
 name = "sysprims-session"
 version = "0.2.2"
-source = "git+https://github.com/3leaps/sysprims?rev=1e56e8b7fbe004a0a1b028b81ba11193e1dd71ff#1e56e8b7fbe004a0a1b028b81ba11193e1dd71ff"
+source = "git+https://github.com/3leaps/sysprims?rev=7e5cc03847029dbd316d9f8c0887997bf64a247c#7e5cc03847029dbd316d9f8c0887997bf64a247c"
 dependencies = [
  "libc",
  "sysprims-core",
@@ -762,7 +762,7 @@ dependencies = [
 [[package]]
 name = "sysprims-signal"
 version = "0.2.2"
-source = "git+https://github.com/3leaps/sysprims?rev=1e56e8b7fbe004a0a1b028b81ba11193e1dd71ff#1e56e8b7fbe004a0a1b028b81ba11193e1dd71ff"
+source = "git+https://github.com/3leaps/sysprims?rev=7e5cc03847029dbd316d9f8c0887997bf64a247c#7e5cc03847029dbd316d9f8c0887997bf64a247c"
 dependencies = [
  "libc",
  "rsfulmen",
@@ -773,7 +773,7 @@ dependencies = [
 [[package]]
 name = "sysprims-timeout"
 version = "0.2.2"
-source = "git+https://github.com/3leaps/sysprims?rev=1e56e8b7fbe004a0a1b028b81ba11193e1dd71ff#1e56e8b7fbe004a0a1b028b81ba11193e1dd71ff"
+source = "git+https://github.com/3leaps/sysprims?rev=7e5cc03847029dbd316d9f8c0887997bf64a247c#7e5cc03847029dbd316d9f8c0887997bf64a247c"
 dependencies = [
  "libc",
  "rsfulmen",

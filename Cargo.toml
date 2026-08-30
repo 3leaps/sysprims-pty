@@ -90,7 +90,7 @@ version = "1.1"
 
 [dependencies.sysprims-timeout]
 git = "https://github.com/3leaps/sysprims"
-rev = "1e56e8b7fbe004a0a1b028b81ba11193e1dd71ff"
+rev = "7e5cc03847029dbd316d9f8c0887997bf64a247c"
 version = "=0.2.2"
 
 [dev-dependencies.futures]
@@ -131,5 +131,5 @@ version = "0.10"
 
 [target."cfg(unix)".dependencies.sysprims-session]
 git = "https://github.com/3leaps/sysprims"
-rev = "1e56e8b7fbe004a0a1b028b81ba11193e1dd71ff"
+rev = "7e5cc03847029dbd316d9f8c0887997bf64a247c"
 version = "=0.2.2"
