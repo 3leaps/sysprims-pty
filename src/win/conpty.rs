@@ -237,14 +237,14 @@ mod tests {
         let marker = marker_path("resume-sentinel");
         let _ = std::fs::remove_file(&marker);
         let (master, slave) = open_conpty(PtySize::default()).expect("ConPTY open failed");
-        let mut command = CommandBuilder::new("cmd.exe");
+        let mut command =
+            CommandBuilder::new(std::env::current_exe().expect("current test executable missing"));
         command.args([
-            "/C",
-            &format!(
-                "echo started>\"{}\" & ping -n 30 127.0.0.1 >NUL",
-                marker.display()
-            ),
+            "--exact",
+            "win::conpty::tests::resume_sentinel_helper",
+            "--nocapture",
         ]);
+        command.env("SYSPRIMS_PTY_RESUME_SENTINEL", &marker);
 
         let mut guard = slave
             .spawn_contained_command_inner(command, |guard| {
@@ -265,7 +265,7 @@ mod tests {
             })
             .expect("contained ConPTY spawn failed");
 
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(10);
         while !marker.exists() {
             assert!(Instant::now() < deadline, "resumed child did not execute");
             std::thread::sleep(Duration::from_millis(10));
@@ -293,8 +293,14 @@ mod tests {
         let marker = marker_path("failed-resume");
         let _ = std::fs::remove_file(&marker);
         let (_master, slave) = open_conpty(PtySize::default()).expect("ConPTY open failed");
-        let mut command = CommandBuilder::new("cmd.exe");
-        command.args(["/C", &format!("echo started>\"{}\"", marker.display())]);
+        let mut command =
+            CommandBuilder::new(std::env::current_exe().expect("current test executable missing"));
+        command.args([
+            "--exact",
+            "win::conpty::tests::resume_sentinel_helper",
+            "--nocapture",
+        ]);
+        command.env("SYSPRIMS_PTY_RESUME_SENTINEL", &marker);
 
         let error = match slave.spawn_contained_command_inner(command, |_| {
             Err(anyhow::anyhow!("injected resume-gate failure"))
@@ -308,5 +314,14 @@ mod tests {
             !marker.exists(),
             "failed resume transaction executed the child"
         );
+    }
+
+    #[test]
+    fn resume_sentinel_helper() {
+        let Some(marker) = std::env::var_os("SYSPRIMS_PTY_RESUME_SENTINEL") else {
+            return;
+        };
+        std::fs::write(marker, b"started").expect("failed to write resume sentinel");
+        std::thread::sleep(Duration::from_secs(30));
     }
 }
