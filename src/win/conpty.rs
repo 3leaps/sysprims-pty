@@ -232,11 +232,21 @@ mod tests {
         ))
     }
 
+    fn drain_output(master: &ConPtyMasterPty) {
+        let mut reader = master
+            .try_clone_reader()
+            .expect("ConPTY output reader clone failed");
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut reader, &mut std::io::sink());
+        });
+    }
+
     #[test]
     fn child_cannot_run_before_assignment_proof_and_resume() {
         let marker = marker_path("resume-sentinel");
         let _ = std::fs::remove_file(&marker);
         let (master, slave) = open_conpty(PtySize::default()).expect("ConPTY open failed");
+        drain_output(&master);
         let mut command =
             CommandBuilder::new(std::env::current_exe().expect("current test executable missing"));
         command.args([
@@ -292,7 +302,8 @@ mod tests {
     fn failed_resume_gate_never_runs_child() {
         let marker = marker_path("failed-resume");
         let _ = std::fs::remove_file(&marker);
-        let (_master, slave) = open_conpty(PtySize::default()).expect("ConPTY open failed");
+        let (master, slave) = open_conpty(PtySize::default()).expect("ConPTY open failed");
+        drain_output(&master);
         let mut command =
             CommandBuilder::new(std::env::current_exe().expect("current test executable missing"));
         command.args([

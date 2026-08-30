@@ -307,6 +307,14 @@ fn assert_process_exited(handle: &std::os::windows::io::OwnedHandle) {
 }
 
 #[cfg(windows)]
+fn drain_windows_pty_output(master: &dyn portable_pty::MasterPty) {
+    let mut reader = master.try_clone_reader().unwrap();
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut reader, &mut std::io::sink());
+    });
+}
+
+#[cfg(windows)]
 #[test]
 fn immediate_child_and_grandchild_remain_in_owned_job() {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
@@ -321,6 +329,7 @@ fn immediate_child_and_grandchild_remain_in_owned_job() {
     command.env("SYSPRIMS_PTY_GRANDCHILD_PID_FILE", &grandchild_pid_file);
 
     let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+    drain_windows_pty_output(pair.master.as_ref());
     let mut guard = pair.slave.spawn_contained_command(command).unwrap();
     let child_handle = open_process_for_wait(wait_for_pid_file(&child_pid_file));
     let grandchild_handle = open_process_for_wait(wait_for_pid_file(&grandchild_pid_file));
@@ -354,6 +363,7 @@ fn create_breakaway_from_job_cannot_escape() {
     command.env("SYSPRIMS_PTY_BREAKAWAY_RESULT_FILE", &result_file);
 
     let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+    drain_windows_pty_output(pair.master.as_ref());
     let mut guard = pair.slave.spawn_contained_command(command).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let result = loop {
