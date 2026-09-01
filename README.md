@@ -19,7 +19,7 @@ an owned, verifiable process lifecycle.
 
 The package name is `sysprims-pty`. The library target is `portable_pty`,
 so existing `portable_pty` imports can keep working after a package rename.
-The first public version coordinate is `0.9.0`.
+The first public version coordinate is `0.9.1`.
 
 ## What you can build
 
