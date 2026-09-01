@@ -23,8 +23,8 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
-      - run: sh -n scripts/run-owned-pty-empty.sh
-      - run: sh -n scripts/run-diabolical-docker.sh
+      - run: for script in scripts/*.sh; do bash -n "$script"; done
+      - run: python3 -m py_compile scripts/*.py
 
   lint:
     name: Clippy
@@ -44,6 +44,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88.0
       - run: cargo build --all-targets --all-features
       - run: cargo test --all-targets --all-features
+
+  release-package:
+    name: Release Package Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: clippy
+      - run: make release-tooling-test
+      - run: make release-check
 
   test:
     name: Test (${{ matrix.target }})

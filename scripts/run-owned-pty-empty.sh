@@ -3,7 +3,7 @@ set -eu
 
 companion_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 sysprims_root=${SYSPRIMS_ROOT:-"$companion_root/../sysprims"}
-reviewed_sysprims_rev=7e5cc03847029dbd316d9f8c0887997bf64a247c
+reviewed_sysprims_rev=e366d37bbdbe28764c0f7022577b1999393742cb
 
 case "$(uname -s)" in
     Darwin|Linux) ;;
@@ -37,26 +37,20 @@ awk \
     -v timeout_path="$sysprims_root/crates/sysprims-timeout" \
     -v session_path="$sysprims_root/crates/sysprims-session" \
     '
-    $0 == "[dependencies.sysprims-timeout]" {
-        print
-        print "path = \"" timeout_path "\""
-        replacing_timeout = 1
-        next
-    }
-    replacing_timeout {
-        if ($0 == "") {
-            print
-            replacing_timeout = 0
-        }
+    $0 ~ /^sysprims-timeout = / {
+        print "sysprims-timeout = { path = \"" timeout_path "\" }"
         next
     }
     $0 == "[target.\"cfg(unix)\".dependencies.sysprims-session]" {
         print
-        print "path = \"" session_path "\""
-        replacing_session = 1
+        in_unix = 1
         next
     }
-    replacing_session { next }
+    in_unix && $0 ~ /^version = / {
+        print "path = \"" session_path "\""
+        in_unix = 0
+        next
+    }
     { print }
     ' "$work_root/companion/Cargo.toml" >"$work_root/Cargo.toml"
 mv "$work_root/Cargo.toml" "$work_root/companion/Cargo.toml"

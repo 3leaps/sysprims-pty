@@ -19,8 +19,7 @@ an owned, verifiable process lifecycle.
 
 The package name is `sysprims-pty`. The library target is `portable_pty`,
 so existing `portable_pty` imports can keep working after a package rename.
-crates.io version coordinates will appear at first publish; they are not
-resolvable yet.
+The first public version coordinate is `0.9.0`.
 
 ## What you can build
 
@@ -88,11 +87,11 @@ opens a real controlling PTY, starts at least one descendant, and proves
 make test-owned-pty-empty
 ```
 
-The runner uses the sibling `../sysprims` checkout by default, verifies a
-clean exact revision, then applies it as a local source override in an
+The runner uses the sibling `../sysprims` checkout by default, verifies the
+reviewed sysprims revision, then applies it as a local source override in an
 isolated copy. Set `SYSPRIMS_ROOT` to use another checkout. The package
-manifest retains the released minimum dependency; this target proves a
-separately reviewed candidate.
+manifest retains registry-resolvable released dependencies; this target proves
+a separately reviewed candidate without changing the public package edges.
 
 The target is intentionally separate from ordinary CI because its evidence
 depends on real Unix PTY and process-group behavior. `make help` lists the
