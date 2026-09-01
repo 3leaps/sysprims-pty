@@ -3,7 +3,7 @@ set -eu
 
 companion_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 sysprims_root=${SYSPRIMS_ROOT:-"$companion_root/../sysprims"}
-reviewed_sysprims_rev=7e5cc03847029dbd316d9f8c0887997bf64a247c
+reviewed_sysprims_rev=e366d37bbdbe28764c0f7022577b1999393742cb
 
 if ! docker info >/dev/null 2>&1; then
     echo "docker daemon unavailable; start the reviewed disposable runtime" >&2
@@ -22,10 +22,7 @@ docker run --rm \
         cp -R /work/companion /tmp/companion
         cd /tmp/companion
         sed -i \
-          -e "/^\[dependencies.sysprims-timeout\]$/,/^$/c\\
-[dependencies.sysprims-timeout]\\
-path = \"/work/sysprims/crates/sysprims-timeout\"\\
-" \
+          -e "s|^sysprims-timeout = .*|sysprims-timeout = { path = \"/work/sysprims/crates/sysprims-timeout\" }|" \
           -e "/^\[target.\"cfg(unix)\".dependencies.sysprims-session\]$/,\$c\\
 [target.\"cfg(unix)\".dependencies.sysprims-session]\\
 path = \"/work/sysprims/crates/sysprims-session\"\\
