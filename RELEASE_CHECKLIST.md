@@ -70,7 +70,7 @@ handled:
 Required local signing environment:
 
 - `SYSPRIMS_PTY_RELEASE_TAG`: release tag with the leading `v`, for example
-  `v0.9.0`.
+  `v0.9.1`.
 - `SYSPRIMS_PTY_MINISIGN_KEY`: minisign secret key path.
 - `SYSPRIMS_PTY_MINISIGN_PUB`: minisign public key path. If omitted, the
   tooling derives it from `SYSPRIMS_PTY_MINISIGN_KEY` by replacing `.key` with

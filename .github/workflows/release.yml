@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88.0
         with:
-          components: clippy
+          components: rustfmt, clippy
       - run: make check
       - run: make release-check
 
