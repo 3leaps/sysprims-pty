@@ -5,6 +5,11 @@ TAG=${1:?"usage: upload-release-assets.sh <tag> [dir]"}
 DIR=${2:-dist/release}
 test -d "$DIR"
 
+if [ "$(gh release view "$TAG" --json isDraft --jq '.isDraft')" != "true" ]; then
+	echo "error: release ${TAG} is not draft; refusing to mutate published release" >&2
+	exit 1
+fi
+
 cd "$DIR"
 
 required=(
@@ -32,5 +37,7 @@ done
 
 gh release upload "$TAG" "${uploads[@]}" --clobber
 gh release edit "$TAG" --notes-file "release-notes-${TAG}.md"
+cd - >/dev/null
+"$(dirname "$0")/verify-release-draft-assets.sh" "$TAG" signed
 
 echo "[ok] signed assets uploaded; release remains draft until an explicit undraft cue"
