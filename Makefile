@@ -3,6 +3,7 @@
 .PHONY: release-check release-preflight release-clean release-download release-notes
 .PHONY: release-checksums release-sign release-export-keys release-verify-checksums
 .PHONY: release-verify-signatures release-verify-keys release-verify release-upload release
+.PHONY: release-verify-tag-workflow release-verify-draft-assets release-download-signed release-smoke-consumer
 
 VERSION := $(shell tr -d '\r\n' < VERSION 2>/dev/null || echo "dev")
 SYSPRIMS_PTY_RELEASE_TAG ?= v$(VERSION)
@@ -20,10 +21,13 @@ help:
 		'release-check         Run package and dry-run publish gates' \
 		'release-preflight     Verify clean synced main and all pre-tag gates' \
 		'release-download      Download draft release provenance assets' \
+		'release-download-signed Download signed release assets for verification' \
 		'release-checksums     Copy notes and generate checksum manifests' \
 		'release-sign          Sign checksum manifests locally' \
 		'release-export-keys   Export public signing keys locally' \
 		'release-verify        Verify checksums, signatures, and public-only keys' \
+		'release-verify-tag-workflow Verify tag Release workflow success' \
+		'release-smoke-consumer Verify registry-only consumer after crates.io publish' \
 		'release-upload        Upload signed assets; does not undraft release'
 
 check:
@@ -85,6 +89,15 @@ release-clean:
 release-download: release-clean release-guard-tag-version-post
 	./scripts/download-release-assets.sh "$(SYSPRIMS_PTY_RELEASE_TAG)" "$(DIST_RELEASE)"
 
+release-download-signed: release-clean release-guard-tag-version-post
+	./scripts/download-signed-release-assets.sh "$(SYSPRIMS_PTY_RELEASE_TAG)" "$(DIST_RELEASE)"
+
+release-verify-tag-workflow: release-guard-tag-version-post
+	./scripts/verify-tag-release-workflow.sh "$(SYSPRIMS_PTY_RELEASE_TAG)"
+
+release-verify-draft-assets: release-guard-tag-version-post
+	./scripts/verify-release-draft-assets.sh "$(SYSPRIMS_PTY_RELEASE_TAG)" "$${MODE:-unsigned}"
+
 release-notes:
 	mkdir -p "$(DIST_RELEASE)"
 	cp "docs/releases/$(SYSPRIMS_PTY_RELEASE_TAG).md" "$(DIST_RELEASE)/release-notes-$(SYSPRIMS_PTY_RELEASE_TAG).md"
@@ -113,6 +126,9 @@ release-verify: release-verify-checksums release-verify-signatures release-verif
 
 release-upload: release-guard-tag-version-post release-verify
 	./scripts/upload-release-assets.sh "$(SYSPRIMS_PTY_RELEASE_TAG)" "$(DIST_RELEASE)"
+
+release-smoke-consumer:
+	./scripts/smoke-registry-consumer.sh
 
 release: release-clean release-download release-checksums release-sign release-export-keys release-verify release-upload
 	@echo "[ok] release assets uploaded; undraft requires a separate explicit cue"
