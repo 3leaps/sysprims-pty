@@ -2,6 +2,16 @@
 
 All notable changes to `sysprims-pty` are documented here.
 
+## 0.9.2 - 2026-09-21
+
+- Updates the exact `sysprims-session` and `sysprims-timeout` pins to the
+  published 0.2.4 line.
+- Refreshes locked `anyhow` and `event-listener` dependencies to versions
+  without published advisories.
+- Fixes MSRV clippy findings in the async example and pins the contributor
+  toolchain to Rust 1.88.0 so local gates match CI.
+- No API or behavior changes.
+
 ## 0.9.1 - 2026-09-01
 
 - First public release for the crates.io publication.

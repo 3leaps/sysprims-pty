@@ -32,8 +32,8 @@ if package.group(1) != version:
     fail(f"Cargo.toml version {package.group(1)} does not match VERSION {version}")
 
 required = {
-    'sysprims-timeout = "=0.2.3"': "sysprims-timeout registry dependency",
-    'version = "=0.2.3"': "sysprims-session registry dependency",
+    'sysprims-timeout = "=0.2.4"': "sysprims-timeout registry dependency",
+    'version = "=0.2.4"': "sysprims-session registry dependency",
     "publish = true": "publish flag",
 }
 for needle, label in required.items():
@@ -61,7 +61,7 @@ for crate in ("sysprims-session", "sysprims-timeout"):
     match = pattern.search(lock)
     if not match:
         fail(f"Cargo.lock missing registry source for {crate}")
-    if match.group(1) != "0.2.3":
-        fail(f"Cargo.lock has {crate} {match.group(1)}, expected 0.2.3")
+    if match.group(1) != "0.2.4":
+        fail(f"Cargo.lock has {crate} {match.group(1)}, expected 0.2.4")
 
 print(f"[ok] version pack is coherent for v{version}")
