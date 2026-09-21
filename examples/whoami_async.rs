@@ -41,10 +41,8 @@ fn main() -> anyhow::Result<()> {
 
         println!(
             "child status: {:?}",
-            smol::unblock(move || child
-                .wait()
-                .map_err(|e| anyhow!("waiting for child: {}", e)))
-            .await?
+            smol::unblock(move || child.wait().map_err(|e| anyhow!("waiting for child: {e}")))
+                .await?
         );
 
         let reader = pair.master.try_clone_reader()?;
@@ -56,7 +54,7 @@ fn main() -> anyhow::Result<()> {
 
         let mut lines = smol::io::BufReader::new(smol::Unblock::new(reader)).lines();
         while let Some(line) = lines.next().await {
-            let line = line.map_err(|e| anyhow!("problem reading line: {}", e))?;
+            let line = line.map_err(|e| anyhow!("problem reading line: {e}"))?;
             // We print with escapes escaped because the windows conpty
             // implementation synthesizes title change escape sequences
             // in the output stream and it can be confusing to see those
