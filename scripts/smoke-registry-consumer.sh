@@ -13,7 +13,7 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 cd "$WORK_DIR"
-cargo init --bin --quiet
+cargo init --bin --quiet --name sysprims-pty-consumer-smoke
 
 cat > Cargo.toml <<EOF
 [package]
